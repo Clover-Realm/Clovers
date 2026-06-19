@@ -148,6 +148,109 @@ Deploy and initialize:
 npx ts-node scripts/deploy.ts all
 ```
 
+## Production Deployment Guide
+
+Production deployments should be treated as irreversible infrastructure changes. Prepare keys, monitoring, and rollback documentation before installing the WASM on public network.
+
+### Prerequisites
+
+- Funded deployment account with enough XLM for contract installation, instance creation, initialization, and follow-up admin transactions.
+- Reliable Soroban RPC endpoint for the target network, preferably with a backup provider.
+- Admin keypair stored in a secure secret manager or hardware-backed signer.
+- Fee collector public key controlled by the operations or treasury owner.
+- Final fee value in basis points. Keep the value within the contract maximum and document business approval for the rate.
+- Built and reviewed WASM artifact from the exact commit being deployed.
+
+### Step-by-step deployment
+
+1. Build the optimized WASM artifact:
+
+   ```bash
+   cargo build -p onboarding-bridge --release --target wasm32-unknown-unknown
+   ```
+
+2. Install the WASM on the target network:
+
+   ```bash
+   stellar contract install \
+     --wasm target/wasm32-unknown-unknown/release/onboarding_bridge.wasm \
+     --source <DEPLOYER_SECRET_OR_IDENTITY> \
+     --network <NETWORK>
+   ```
+
+3. Create the contract instance from the installed WASM hash:
+
+   ```bash
+   stellar contract deploy \
+     --wasm-hash <WASM_HASH> \
+     --source <DEPLOYER_SECRET_OR_IDENTITY> \
+     --network <NETWORK>
+   ```
+
+4. Initialize the contract with the approved administrator, fee collector, and fee basis points:
+
+   ```bash
+   stellar contract invoke \
+     --id <CONTRACT_ID> \
+     --source <ADMIN_SECRET_OR_IDENTITY> \
+     --network <NETWORK> \
+     -- initialize \
+     --admin <ADMIN_ADDRESS> \
+     --fee_collector <FEE_COLLECTOR_ADDRESS> \
+     --fee_bps <FEE_BPS>
+   ```
+
+5. Record the commit SHA, WASM hash, contract ID, admin address, fee collector, fee bps, RPC endpoint, and deployment transaction hashes in the release notes.
+
+### Post-deployment verification
+
+Run read-only checks immediately after initialization:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> --network <NETWORK> -- query_is_initialized
+stellar contract invoke --id <CONTRACT_ID> --network <NETWORK> -- query_admin
+stellar contract invoke --id <CONTRACT_ID> --network <NETWORK> -- query_fee_collector
+stellar contract invoke --id <CONTRACT_ID> --network <NETWORK> -- query_fee_bps
+```
+
+Then perform a small testnet-sized funding flow with a production-approved test account before announcing availability. Confirm the submitted transaction, emitted event, fee accrual, SDK read path, and explorer link.
+
+### Monitoring
+
+Monitor the contract and surrounding infrastructure for:
+
+- `CAddressFunded` and `FeesWithdrawn` event volume.
+- Failed funding transactions and rejected invocations.
+- RPC latency, error rate, and provider failover.
+- Fee balance growth and withdrawal success.
+- Unexpected admin operations or configuration changes.
+
+Persist the last processed ledger for event listeners so monitoring can resume without gaps after restarts.
+
+### Fee withdrawal schedule
+
+Define an operational schedule before launch. A typical pattern is weekly or monthly withdrawal, with additional threshold-based withdrawals when accumulated fees exceed an approved value. Each withdrawal should record the transaction hash, amount, destination account, operator, and approval reference.
+
+### Production security considerations
+
+- Keep admin and fee-collector signing keys separate.
+- Use multisig, hardware-backed signing, or a custody workflow where available.
+- Never store production secrets in repository files, CI logs, screenshots, or issue comments.
+- Limit who can invoke admin functions and review every admin transaction before signing.
+- Verify contract IDs and network passphrases in frontend, backend, and SDK configuration.
+- Keep a tested incident path for pausing integrations or disabling frontend entry points if a deployment issue is found.
+
+### Disaster recovery
+
+Maintain a recovery runbook with:
+
+- Current contract ID, WASM hash, and release commit.
+- Backup RPC providers and expected configuration values.
+- Admin key recovery and rotation process.
+- Steps for redeploying the latest approved WASM.
+- Communication plan for integrators and users.
+- Criteria for stopping off-ramp links, CEX memo generation, or frontend funding entry points during an incident.
+
 ## SDK Integration Guide
 
 Install the SDK package in your application and keep the network settings aligned with the deployed contract:
