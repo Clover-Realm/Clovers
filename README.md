@@ -1,3 +1,5 @@
+[![Documentation](https://github.com/C-Address-Onboarding-Bridge/C-Address-Onboarding-Bridge--Contract/actions/workflows/docs.yml/badge.svg)](https://github.com/C-Address-Onboarding-Bridge/C-Address-Onboarding-Bridge--Contract/actions/workflows/docs.yml)
+
 # C-Address Onboarding Bridge
 
 A Soroban smart contract + TypeScript SDK that lets anyone fund a Soroban smart account (C-address) directly from a CEX withdrawal, a credit card, or an existing G-address without the user needing to understand the underlying account model.
