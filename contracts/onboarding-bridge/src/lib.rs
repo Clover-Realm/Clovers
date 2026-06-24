@@ -232,6 +232,12 @@ impl OnboardingBridge {
         token_client.balance(&c_address)
     }
 
+    pub fn query_fee_balance(env: Env, asset: Address) -> Result<i128, BridgeError> {
+        check_initialized(&env)?;
+        let token_client = token::Client::new(&env, &asset);
+        Ok(token_client.balance(&env.current_contract_address()))
+    }
+
     pub fn query_is_initialized(env: Env) -> bool {
         read_initialized(&env)
     }

@@ -307,6 +307,66 @@ fn test_query_fee_bps_uninitialized() {
     );
 }
 
+#[test]
+fn test_query_fee_balance_zero() {
+    let env = Env::default();
+    let (admin, _user, fee_collector) = create_test_users(&env);
+    let (bridge_id, token_id) = register_all_contracts(&env);
+    let bridge = create_bridge_client(&env, &bridge_id);
+    init_token(&env, &token_id, &admin);
+
+    bridge.initialize(&admin, &fee_collector, &100u32);
+
+    assert_eq!(bridge.query_fee_balance(&token_id), 0i128);
+}
+
+#[test]
+fn test_query_fee_balance_uninitialized() {
+    let env = Env::default();
+    let (bridge_id, token_id) = register_all_contracts(&env);
+    let bridge = create_bridge_client(&env, &bridge_id);
+
+    assert_eq!(
+        bridge.try_query_fee_balance(&token_id),
+        Err(Ok(BridgeError::NotInitialized))
+    );
+}
+
+#[test]
+fn test_query_fee_balance_post_fund() {
+    let env = Env::default();
+    let (admin, user, fee_collector) = create_test_users(&env);
+    let (bridge_id, token_id) = register_all_contracts(&env);
+    let bridge = create_bridge_client(&env, &bridge_id);
+    init_token(&env, &token_id, &admin);
+
+    bridge.initialize(&admin, &fee_collector, &100u32);
+    mint_tokens(&env, &token_id, &user, 1000i128);
+
+    let target = Address::generate(&env);
+    bridge.fund_c_address(&user, &target, &token_id, &500i128);
+
+    assert_eq!(bridge.query_fee_balance(&token_id), 5i128);
+}
+
+#[test]
+fn test_query_fee_balance_initialized() {
+    let env = Env::default();
+    let (admin, user, fee_collector) = create_test_users(&env);
+    let (bridge_id, token_id) = register_all_contracts(&env);
+    let bridge = create_bridge_client(&env, &bridge_id);
+    init_token(&env, &token_id, &admin);
+
+    bridge.initialize(&admin, &fee_collector, &200u32);
+    mint_tokens(&env, &token_id, &user, 2000i128);
+
+    let target = Address::generate(&env);
+    bridge.fund_c_address(&user, &target, &token_id, &1000i128);
+    bridge.fund_c_address(&user, &target, &token_id, &1000i128);
+
+    assert_eq!(bridge.query_fee_balance(&token_id), 40i128);
+}
+
 /********** Minimal Test Token **********/
 
 #[contracttype]
