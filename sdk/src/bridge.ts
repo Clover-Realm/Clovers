@@ -420,7 +420,7 @@ export class OnboardingBridgeSDK {
 
       return {
         hash: response.hash,
-        status: response.status === 'success' ? 'success' : 'pending',
+        status: response.status === 'PENDING' ? 'success' : 'pending',
       };
     } catch (error: any) {
       return {
