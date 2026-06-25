@@ -241,6 +241,23 @@ export class OnboardingBridgeSDK {
   }
 
   /**
+   * Get the fee balance held by the contract for a given asset.
+   */
+  async getFeeBalance(asset: string): Promise<string> {
+    const result = await this.provider
+      .simulateTransaction(
+        this.buildSimulationTx('query_fee_balance', [asset]),
+      );
+
+    if ('error' in result && result.error) {
+      throw new Error(`Failed to get fee balance: ${result.error}`);
+    }
+
+    const scVal = (result as any).results?.[0]?.retval;
+    return scVal ? scValToNative(scVal).toString() : '0';
+  }
+
+  /**
    * Check if the bridge contract is initialized.
    */
   async isInitialized(): Promise<boolean> {
