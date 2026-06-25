@@ -15,6 +15,7 @@ pub enum BridgeError {
     ContractPaused = 6,
     AddressBlocked = 7,
     AddressNotAllowlisted = 8,
+    InsufficientReclaimable = 9,
 }
 
 #[contracttype]
@@ -27,6 +28,7 @@ pub enum DataKey {
     Blocked(Address),
     Allowlisted(Address),
     AllowlistMode,
+    AccruedFees(Address),
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -123,6 +125,27 @@ fn check_access(env: &Env, target: &Address) -> Result<(), BridgeError> {
     Ok(())
 }
 
+fn read_accrued_fees(env: &Env, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AccruedFees(asset.clone()))
+        .unwrap_or(0)
+}
+
+fn increment_accrued_fees(env: &Env, asset: &Address, amount: i128) {
+    let current = read_accrued_fees(env, asset);
+    env.storage()
+        .persistent()
+        .set(&DataKey::AccruedFees(asset.clone()), &(current + amount));
+}
+
+fn decrement_accrued_fees(env: &Env, asset: &Address, amount: i128) {
+    let current = read_accrued_fees(env, asset);
+    env.storage()
+        .persistent()
+        .set(&DataKey::AccruedFees(asset.clone()), &(current - amount));
+}
+
 #[contract]
 pub struct OnboardingBridge;
 
@@ -174,6 +197,7 @@ impl OnboardingBridge {
             token_client.transfer(&env.current_contract_address(), &target, &net_amount);
         }
 
+        increment_accrued_fees(&env, &asset, fee);
         env.events()
             .publish(("CAddressFunded", source, target), (amount, fee, asset));
         Ok(())
@@ -222,6 +246,7 @@ impl OnboardingBridge {
                 token_client.transfer(&contract_addr, &target, &net_amount);
             }
 
+            increment_accrued_fees(&env, &asset, fee);
             env.events().publish(
                 ("CAddressFunded", source.clone(), target),
                 (amount, fee, asset.clone()),
@@ -272,6 +297,7 @@ impl OnboardingBridge {
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&env.current_contract_address(), &fee_collector, &amount);
 
+        decrement_accrued_fees(&env, &asset, amount);
         env.events()
             .publish(("FeesWithdrawn", fee_collector), (amount, asset));
         Ok(())
@@ -396,6 +422,34 @@ impl OnboardingBridge {
 
     pub fn query_allowlist_mode(env: Env) -> bool {
         allowlist_mode(&env)
+    }
+
+    pub fn reclaim_tokens(
+        env: Env,
+        asset: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        let admin = read_admin(&env);
+        admin.require_auth();
+
+        let token_client = token::Client::new(&env, &asset);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        let accrued = read_accrued_fees(&env, &asset);
+        let reclaimable = contract_balance - accrued;
+
+        if reclaimable < amount {
+            return Err(BridgeError::InsufficientReclaimable);
+        }
+
+        token_client.transfer(&env.current_contract_address(), &destination, &amount);
+        env.events()
+            .publish(("TokensReclaimed", admin, asset), (amount, destination));
+        Ok(())
     }
 }
 
