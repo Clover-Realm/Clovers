@@ -1132,3 +1132,50 @@ fn test_initialize_emits_event() {
     let (contract_id, _topics, _data) = &events.get(events.len() - 1).unwrap();
     assert_eq!(contract_id, &bridge_id);
 }
+
+#[test]
+fn test_fee_bps_changed_emits_event() {
+    let env = Env::default();
+    let (admin, _user, fee_collector) = create_test_users(&env);
+    let (bridge_id, _) = register_all_contracts(&env);
+    let bridge = create_bridge_client(&env, &bridge_id);
+
+    bridge.initialize(&admin, &fee_collector, &50u32);
+    bridge.set_fee_bps(&100u32);
+
+    let events = env.events().all();
+    let (contract_id, _topics, _data) = &events.get(events.len() - 1).unwrap();
+    assert_eq!(contract_id, &bridge_id);
+}
+
+#[test]
+fn test_fee_collector_changed_emits_event() {
+    let env = Env::default();
+    let (admin, _user, fee_collector) = create_test_users(&env);
+    let (bridge_id, _) = register_all_contracts(&env);
+    let bridge = create_bridge_client(&env, &bridge_id);
+
+    bridge.initialize(&admin, &fee_collector, &50u32);
+    let new_collector = Address::generate(&env);
+    bridge.set_fee_collector(&new_collector);
+
+    let events = env.events().all();
+    let (contract_id, _topics, _data) = &events.get(events.len() - 1).unwrap();
+    assert_eq!(contract_id, &bridge_id);
+}
+
+#[test]
+fn test_admin_changed_emits_event() {
+    let env = Env::default();
+    let (admin, _user, fee_collector) = create_test_users(&env);
+    let (bridge_id, _) = register_all_contracts(&env);
+    let bridge = create_bridge_client(&env, &bridge_id);
+
+    bridge.initialize(&admin, &fee_collector, &50u32);
+    let new_admin = Address::generate(&env);
+    bridge.set_admin(&new_admin);
+
+    let events = env.events().all();
+    let (contract_id, _topics, _data) = &events.get(events.len() - 1).unwrap();
+    assert_eq!(contract_id, &bridge_id);
+}

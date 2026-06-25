@@ -332,7 +332,10 @@ impl OnboardingBridge {
         }
         let admin = read_admin(&env);
         admin.require_auth();
+        let old_fee_bps = read_fee_bps(&env);
         save_fee_bps(&env, &new_fee_bps);
+        env.events()
+            .publish(("FeeBpsChanged", old_fee_bps, new_fee_bps), (admin,));
         Ok(())
     }
 
@@ -341,7 +344,10 @@ impl OnboardingBridge {
         check_not_paused(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        let old_collector = read_fee_collector(&env);
         save_fee_collector(&env, &new_fee_collector);
+        env.events()
+            .publish(("FeeCollectorChanged", old_collector, new_fee_collector), (admin,));
         Ok(())
     }
 
@@ -351,6 +357,8 @@ impl OnboardingBridge {
         let admin = read_admin(&env);
         admin.require_auth();
         save_admin(&env, &new_admin);
+        env.events()
+            .publish(("AdminChanged", admin, new_admin.clone()), ());
         Ok(())
     }
 
