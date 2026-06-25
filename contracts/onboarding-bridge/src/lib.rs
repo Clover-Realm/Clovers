@@ -13,6 +13,9 @@ pub enum BridgeError {
     FeeTooHigh = 4,
     MismatchedArrays = 5,
     ContractPaused = 6,
+    AddressBlocked = 7,
+    AddressNotAllowlisted = 8,
+    InsufficientReclaimable = 9,
 }
 
 #[contracttype]
@@ -22,6 +25,10 @@ pub enum DataKey {
     FeeBps,
     Initialized,
     Paused,
+    Blocked(Address),
+    Allowlisted(Address),
+    AllowlistMode,
+    AccruedFees(Address),
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -95,6 +102,58 @@ fn calculate_fee(amount: i128, fee_bps: u32) -> i128 {
     (amount * fee_bps as i128) / FEE_DENOMINATOR
 }
 
+fn is_blocked(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Blocked(addr.clone()))
+        .unwrap_or(false)
+}
+
+fn is_allowlisted(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Allowlisted(addr.clone()))
+        .unwrap_or(false)
+}
+
+fn allowlist_mode(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::AllowlistMode)
+        .unwrap_or(false)
+}
+
+fn check_access(env: &Env, target: &Address) -> Result<(), BridgeError> {
+    if is_blocked(env, target) {
+        return Err(BridgeError::AddressBlocked);
+    }
+    if allowlist_mode(env) && !is_allowlisted(env, target) {
+        return Err(BridgeError::AddressNotAllowlisted);
+    }
+    Ok(())
+}
+
+fn read_accrued_fees(env: &Env, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AccruedFees(asset.clone()))
+        .unwrap_or(0)
+}
+
+fn increment_accrued_fees(env: &Env, asset: &Address, amount: i128) {
+    let current = read_accrued_fees(env, asset);
+    env.storage()
+        .persistent()
+        .set(&DataKey::AccruedFees(asset.clone()), &(current + amount));
+}
+
+fn decrement_accrued_fees(env: &Env, asset: &Address, amount: i128) {
+    let current = read_accrued_fees(env, asset);
+    env.storage()
+        .persistent()
+        .set(&DataKey::AccruedFees(asset.clone()), &(current - amount));
+}
+
 #[contract]
 pub struct OnboardingBridge;
 
@@ -132,9 +191,7 @@ impl OnboardingBridge {
         if amount <= 0 {
             return Err(BridgeError::InvalidAmount);
         }
-        if amount < read_minimum_amount(&env) {
-            return Err(BridgeError::BelowMinimum);
-        }
+        check_access(&env, &target)?;
         source.require_auth();
 
         let token_client = token::Client::new(&env, &asset);
@@ -148,6 +205,7 @@ impl OnboardingBridge {
             token_client.transfer(&env.current_contract_address(), &target, &net_amount);
         }
 
+        increment_accrued_fees(&env, &asset, fee);
         env.events()
             .publish(("CAddressFunded", source, target), (amount, fee, asset));
         Ok(())
@@ -170,13 +228,14 @@ impl OnboardingBridge {
         }
         source.require_auth();
 
+        let min_amount = read_min_amount(&env);
         let mut total: i128 = 0;
         for i in 0..targets.len() {
             let amount = amounts.get(i).unwrap();
             if amount <= 0 {
                 return Err(BridgeError::InvalidAmount);
             }
-            if amount < read_minimum_amount(&env) {
+            if amount < min_amount {
                 return Err(BridgeError::BelowMinimum);
             }
             total += amount;
@@ -191,6 +250,7 @@ impl OnboardingBridge {
         for i in 0..targets.len() {
             let target = targets.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
+            check_access(&env, &target)?;
             let fee = calculate_fee(amount, fee_bps);
             let net_amount = amount - fee;
 
@@ -198,6 +258,7 @@ impl OnboardingBridge {
                 token_client.transfer(&contract_addr, &target, &net_amount);
             }
 
+            increment_accrued_fees(&env, &asset, fee);
             env.events().publish(
                 ("CAddressFunded", source.clone(), target),
                 (amount, fee, asset.clone()),
@@ -264,8 +325,30 @@ impl OnboardingBridge {
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&env.current_contract_address(), &fee_collector, &amount);
 
+        decrement_accrued_fees(&env, &asset, amount);
         env.events()
             .publish(("FeesWithdrawn", fee_collector), (amount, asset));
+        Ok(())
+    }
+
+    pub fn reclaim_tokens(
+        env: Env,
+        asset: Address,
+        amount: i128,
+        to: Address,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        let admin = read_admin(&env);
+        admin.require_auth();
+
+        let token_client = token::Client::new(&env, &asset);
+        token_client.transfer(&env.current_contract_address(), &to, &amount);
+
+        env.events()
+            .publish(("TokensReclaimed", admin, to), (amount, asset));
         Ok(())
     }
 
@@ -282,6 +365,18 @@ impl OnboardingBridge {
     pub fn query_admin(env: Env) -> Result<Address, BridgeError> {
         check_initialized(&env)?;
         Ok(read_admin(&env))
+    }
+
+    pub fn set_minimum_amount(env: Env, min_amount: i128) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::MinAmount, &min_amount);
+        Ok(())
+    }
+
+    pub fn query_minimum_amount(env: Env) -> i128 {
+        read_min_amount(&env)
     }
 
     pub fn query_balance(env: Env, c_address: Address, asset: Address) -> i128 {
@@ -328,6 +423,93 @@ impl OnboardingBridge {
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         env.events().publish(("Upgraded",), (admin, new_wasm_hash));
+        Ok(())
+    }
+
+    // --- Blocklist / Allowlist ---
+
+    pub fn add_to_blocklist(env: Env, address: Address) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        read_admin(&env).require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Blocked(address), &true);
+        Ok(())
+    }
+
+    pub fn remove_from_blocklist(env: Env, address: Address) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        read_admin(&env).require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Blocked(address));
+        Ok(())
+    }
+
+    pub fn add_to_allowlist(env: Env, address: Address) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        read_admin(&env).require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allowlisted(address), &true);
+        Ok(())
+    }
+
+    pub fn remove_from_allowlist(env: Env, address: Address) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        read_admin(&env).require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Allowlisted(address));
+        Ok(())
+    }
+
+    pub fn set_allowlist_mode(env: Env, enabled: bool) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        read_admin(&env).require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowlistMode, &enabled);
+        Ok(())
+    }
+
+    pub fn query_is_blocked(env: Env, address: Address) -> bool {
+        is_blocked(&env, &address)
+    }
+
+    pub fn query_is_allowlisted(env: Env, address: Address) -> bool {
+        is_allowlisted(&env, &address)
+    }
+
+    pub fn query_allowlist_mode(env: Env) -> bool {
+        allowlist_mode(&env)
+    }
+
+    pub fn reclaim_tokens(
+        env: Env,
+        asset: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        let admin = read_admin(&env);
+        admin.require_auth();
+
+        let token_client = token::Client::new(&env, &asset);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        let accrued = read_accrued_fees(&env, &asset);
+        let reclaimable = contract_balance - accrued;
+
+        if reclaimable < amount {
+            return Err(BridgeError::InsufficientReclaimable);
+        }
+
+        token_client.transfer(&env.current_contract_address(), &destination, &amount);
+        env.events()
+            .publish(("TokensReclaimed", admin, asset), (amount, destination));
         Ok(())
     }
 }
