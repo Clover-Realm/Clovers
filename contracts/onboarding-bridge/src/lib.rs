@@ -17,6 +17,7 @@ pub enum BridgeError {
     AddressNotAllowlisted = 8,
     InsufficientReclaimable = 9,
     AssetNotWhitelisted = 10,
+    DailyLimitExceeded = 11,
 }
 
 #[contracttype]
@@ -248,13 +249,15 @@ impl OnboardingBridge {
         }
         check_access(&env, &target)?;
         check_asset_whitelisted(&env, &asset)?;
+        check_daily_limit(&env, &source, &asset, amount)?;
         source.require_auth();
 
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&source, &env.current_contract_address(), &amount);
 
-        let fee_bps = read_fee_bps(&env);
-        let fee = calculate_fee(amount, fee_bps);
+        let global_fee_bps = read_fee_bps(&env);
+        let effective_fee_bps = get_effective_fee_bps(&env, &asset, global_fee_bps);
+        let fee = calculate_fee(amount, effective_fee_bps);
         let net_amount = amount - fee;
 
         if net_amount > 0 {
@@ -301,18 +304,32 @@ impl OnboardingBridge {
 
         let fee_bps = read_fee_bps(&env);
         let contract_addr = env.current_contract_address();
+        let mut num_success = 0u32;
+        let mut num_failures = 0u32;
+        let mut refund_amount = 0i128;
 
         for i in 0..targets.len() {
             let target = targets.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
-            check_access(&env, &target)?;
-            let fee = calculate_fee(amount, fee_bps);
+            
+            let effective_fee_bps = get_effective_fee_bps(&env, &asset, fee_bps);
+            let fee = calculate_fee(amount, effective_fee_bps);
             let net_amount = amount - fee;
+
+            if check_access(&env, &target).is_err() {
+                num_failures += 1;
+                refund_amount += amount;
+                env.events().publish(
+                    ("BatchTransferFailed", source.clone(), target.clone()),
+                    (amount, "access_denied"),
+                );
+                continue;
+            }
 
             if net_amount > 0 {
                 token_client.transfer(&contract_addr, &target, &net_amount);
             }
-
+            num_success += 1;
             increment_accrued_fees(&env, &asset, fee);
             increment_total_bridged(&env, &asset, net_amount);
             increment_total_fees_collected(&env, &asset, fee);
@@ -321,6 +338,15 @@ impl OnboardingBridge {
                 (amount, fee, asset.clone()),
             );
         }
+
+        if refund_amount > 0 {
+            token_client.transfer(&contract_addr, &source, &refund_amount);
+        }
+
+        env.events().publish(
+            ("BatchCompleted", source),
+            (num_success, num_failures),
+        );
         Ok(())
     }
 
@@ -337,6 +363,51 @@ impl OnboardingBridge {
         env.events()
             .publish(("FeeBpsChanged", old_fee_bps, new_fee_bps), (admin,));
         Ok(())
+    }
+
+    pub fn set_source_daily_limit(
+        env: Env,
+        source: Address,
+        asset: Address,
+        limit_amount: i128,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        save_source_daily_limit(&env, &source, &asset, limit_amount);
+        Ok(())
+    }
+
+    pub fn query_source_daily_limit(
+        env: Env,
+        source: Address,
+        asset: Address,
+    ) -> Result<i128, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_source_daily_limit(&env, &source, &asset))
+    }
+
+    pub fn set_asset_fee_cap(
+        env: Env,
+        asset: Address,
+        max_fee_bps: u32,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        if max_fee_bps > MAX_FEE_BPS {
+            return Err(BridgeError::FeeTooHigh);
+        }
+        let admin = read_admin(&env);
+        admin.require_auth();
+        save_asset_fee_cap(&env, &asset, max_fee_bps);
+        Ok(())
+    }
+
+    pub fn query_asset_fee_cap(
+        env: Env,
+        asset: Address,
+    ) -> Result<u32, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_asset_fee_cap(&env, &asset))
     }
 
     pub fn set_fee_collector(env: Env, new_fee_collector: Address) -> Result<(), BridgeError> {
