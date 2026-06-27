@@ -56,6 +56,8 @@ pub enum DataKey {
 
 const MAX_FEE_BPS: u32 = 1_000;
 const FEE_DENOMINATOR: i128 = 10_000;
+const DEFAULT_PAGE_LIMIT: u32 = 50;
+const MAX_PAGE_LIMIT: u32 = 200;
 
 #[inline(never)]
 fn save_admin(env: &Env, admin: &Address) {
@@ -930,6 +932,106 @@ impl OnboardingBridge {
     pub fn query_whitelisted_assets(env: Env) -> Result<Vec<Address>, BridgeError> {
         check_initialized(&env)?;
         Ok(read_whitelist(&env).keys())
+    }
+
+    pub fn query_whitelisted_assets_paginated(
+        env: Env,
+        cursor: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<Address>, Option<u32>), BridgeError> {
+        check_initialized(&env)?;
+        let effective_limit = if limit == 0 {
+            DEFAULT_PAGE_LIMIT
+        } else if limit > MAX_PAGE_LIMIT {
+            MAX_PAGE_LIMIT
+        } else {
+            limit
+        };
+        let all_keys = read_whitelist(&env).keys();
+        let total = all_keys.len();
+        let start = cursor.unwrap_or(0);
+        if start >= total {
+            return Ok((Vec::new(&env), None));
+        }
+        let end = if start + effective_limit > total {
+            total
+        } else {
+            start + effective_limit
+        };
+        let mut results = Vec::new(&env);
+        for i in start..end {
+            results.push_back(all_keys.get(i).unwrap());
+        }
+        let next_cursor = if end < total { Some(end) } else { None };
+        Ok((results, next_cursor))
+    }
+
+    pub fn query_accrued_fees_paginated(
+        env: Env,
+        assets: Vec<Address>,
+        cursor: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<(Address, i128)>, Option<u32>), BridgeError> {
+        check_initialized(&env)?;
+        let effective_limit = if limit == 0 {
+            DEFAULT_PAGE_LIMIT
+        } else if limit > MAX_PAGE_LIMIT {
+            MAX_PAGE_LIMIT
+        } else {
+            limit
+        };
+        let total = assets.len();
+        let start = cursor.unwrap_or(0);
+        if start >= total {
+            return Ok((Vec::new(&env), None));
+        }
+        let end = if start + effective_limit > total {
+            total
+        } else {
+            start + effective_limit
+        };
+        let mut results: Vec<(Address, i128)> = Vec::new(&env);
+        for i in start..end {
+            let asset = assets.get(i).unwrap();
+            let fees = read_accrued_fees(&env, &asset);
+            results.push_back((asset, fees));
+        }
+        let next_cursor = if end < total { Some(end) } else { None };
+        Ok((results, next_cursor))
+    }
+
+    pub fn query_fee_tiers_paginated(
+        env: Env,
+        assets: Vec<Address>,
+        cursor: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<(Address, u32)>, Option<u32>), BridgeError> {
+        check_initialized(&env)?;
+        let effective_limit = if limit == 0 {
+            DEFAULT_PAGE_LIMIT
+        } else if limit > MAX_PAGE_LIMIT {
+            MAX_PAGE_LIMIT
+        } else {
+            limit
+        };
+        let total = assets.len();
+        let start = cursor.unwrap_or(0);
+        if start >= total {
+            return Ok((Vec::new(&env), None));
+        }
+        let end = if start + effective_limit > total {
+            total
+        } else {
+            start + effective_limit
+        };
+        let mut results: Vec<(Address, u32)> = Vec::new(&env);
+        for i in start..end {
+            let asset = assets.get(i).unwrap();
+            let cap = read_asset_fee_cap(&env, &asset);
+            results.push_back((asset, cap));
+        }
+        let next_cursor = if end < total { Some(end) } else { None };
+        Ok((results, next_cursor))
     }
 
     // --- Cross-chain Onboarding ---
