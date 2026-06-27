@@ -18,15 +18,9 @@ pub enum BridgeError {
     InsufficientReclaimable = 9,
     AssetNotWhitelisted = 10,
     DailyLimitExceeded = 11,
-    TimelockNotFound = 12,
-    TimelockNotMatured = 13,
-    Unauthorized = 14,
-    InvalidReleaseTime = 15,
-    InvalidSignature = 16,
-    ReplayedNonce = 17,
-    NotRelayer = 18,
-    BelowThreshold = 19,
-    ThresholdExceedsRelayers = 20,
+
+    DuplicateNonce = 12,
+    TransactionExpired = 13,
 }
 
 #[contracttype]
@@ -43,39 +37,9 @@ pub enum DataKey {
     AssetWhitelist,
     TotalBridged(Address),
     TotalFeesCollected(Address),
-    TimelockEntry(u64),
-    TimelockCounter,
-    // Cross-chain
-    Relayer(BytesN<32>),      // ed25519 pubkey → bool
-    RelayerThreshold,
-    RelayerCount,
-    CrossChainNonce(BytesN<32>), // sha256(chain_id||tx_hash) → bool
-    // Per-source per-asset daily limits
-    SourceDailyLimit(Address, Address),  // (source, asset) → limit i128
-    DailyUsage(Address, Address, u64),   // (source, asset, day) → used i128
-    // Per-asset fee cap
-    AssetFeeCap(Address),                // asset → max_fee_bps u32
-}
-
-/// A single relayer attestation: the relayer's Ed25519 public key and its
-/// signature over the canonical cross-chain payload hash.
-#[contracttype]
-#[derive(Clone)]
-pub struct RelayerSig {
-    pub pubkey: BytesN<32>,
-    pub signature: BytesN<64>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TimelockEntry {
-    pub source: Address,
-    pub target: Address,
-    pub asset: Address,
-    pub amount: i128,       // gross amount (fee already deducted at claim time)
-    pub release_time: u64,
-    pub cliff_time: u64,
-    pub claimed: bool,
+    SourceDailyLimit(Address, Address),
+    AssetFeeCap(Address),
+    Nonce(Address),
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -250,28 +214,65 @@ fn increment_total_fees_collected(env: &Env, asset: &Address, amount: i128) {
         .set(&DataKey::TotalFeesCollected(asset.clone()), &(current + amount));
 }
 
-fn next_timelock_id(env: &Env) -> u64 {
-    let id: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::TimelockCounter)
-        .unwrap_or(0u64);
-    env.storage()
-        .instance()
-        .set(&DataKey::TimelockCounter, &(id + 1));
-    id
-}
-
-fn save_timelock_entry(env: &Env, id: u64, entry: &TimelockEntry) {
+fn save_source_daily_limit(env: &Env, source: &Address, asset: &Address, limit: i128) {
     env.storage()
         .persistent()
-        .set(&DataKey::TimelockEntry(id), entry);
+        .set(&DataKey::SourceDailyLimit(source.clone(), asset.clone()), &limit);
 }
 
-fn read_timelock_entry(env: &Env, id: u64) -> Option<TimelockEntry> {
+fn read_source_daily_limit(env: &Env, source: &Address, asset: &Address) -> i128 {
     env.storage()
         .persistent()
-        .get(&DataKey::TimelockEntry(id))
+        .get(&DataKey::SourceDailyLimit(source.clone(), asset.clone()))
+        .unwrap_or(0)
+}
+
+fn check_daily_limit(env: &Env, source: &Address, asset: &Address, amount: i128) -> Result<(), BridgeError> {
+    let limit = read_source_daily_limit(env, source, asset);
+    if limit > 0 && amount > limit {
+        return Err(BridgeError::DailyLimitExceeded);
+    }
+    Ok(())
+}
+
+fn save_asset_fee_cap(env: &Env, asset: &Address, max_fee_bps: u32) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::AssetFeeCap(asset.clone()), &max_fee_bps);
+}
+
+fn read_asset_fee_cap(env: &Env, asset: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AssetFeeCap(asset.clone()))
+        .unwrap_or(MAX_FEE_BPS)
+}
+
+fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32 {
+    let cap = read_asset_fee_cap(env, asset);
+    if global_fee_bps < cap { global_fee_bps } else { cap }
+}
+
+fn read_nonce(env: &Env, caller: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Nonce(caller.clone()))
+        .unwrap_or(0)
+}
+
+/// If `nonce` is `Some(n)`, verify it equals the caller's current nonce then increment.
+/// If `None`, no check is performed (standard Stellar tx path — replay prevented by sequence number).
+fn consume_nonce(env: &Env, caller: &Address, nonce: Option<u64>) -> Result<(), BridgeError> {
+    if let Some(n) = nonce {
+        let stored = read_nonce(env, caller);
+        if n != stored {
+            return Err(BridgeError::DuplicateNonce);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Nonce(caller.clone()), &(stored + 1));
+    }
+    Ok(())
 }
 
 // --- Cross-chain relayer registry ---
@@ -404,6 +405,7 @@ impl OnboardingBridge {
         admin: Address,
         fee_collector: Address,
         fee_bps: u32,
+        nonce: Option<u64>,
     ) -> Result<(), BridgeError> {
         if read_initialized(&env) {
             return Err(BridgeError::AlreadyInitialized);
@@ -412,6 +414,7 @@ impl OnboardingBridge {
             return Err(BridgeError::FeeTooHigh);
         }
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         save_admin(&env, &admin);
         save_fee_collector(&env, &fee_collector);
         save_fee_bps(&env, &fee_bps);
@@ -427,9 +430,16 @@ impl OnboardingBridge {
         target: Address,
         asset: Address,
         amount: i128,
+        nonce: Option<u64>,
+        deadline: Option<u64>,
     ) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         check_not_paused(&env)?;
+        if let Some(d) = deadline {
+            if env.ledger().timestamp() > d {
+                return Err(BridgeError::TransactionExpired);
+            }
+        }
         if amount <= 0 {
             return Err(BridgeError::InvalidAmount);
         }
@@ -437,6 +447,7 @@ impl OnboardingBridge {
         check_asset_whitelisted(&env, &asset)?;
         check_daily_limit(&env, &source, &asset, amount)?;
         source.require_auth();
+        consume_nonce(&env, &source, nonce)?;
 
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&source, &env.current_contract_address(), &amount);
@@ -464,9 +475,16 @@ impl OnboardingBridge {
         targets: Vec<Address>,
         amounts: Vec<i128>,
         asset: Address,
+        nonce: Option<u64>,
+        deadline: Option<u64>,
     ) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         check_not_paused(&env)?;
+        if let Some(d) = deadline {
+            if env.ledger().timestamp() > d {
+                return Err(BridgeError::TransactionExpired);
+            }
+        }
         if targets.len() != amounts.len() {
             return Err(BridgeError::MismatchedArrays);
         }
@@ -475,6 +493,7 @@ impl OnboardingBridge {
         }
         check_asset_whitelisted(&env, &asset)?;
         source.require_auth();
+        consume_nonce(&env, &source, nonce)?;
 
         let mut total: i128 = 0;
         for i in 0..targets.len() {
@@ -536,7 +555,7 @@ impl OnboardingBridge {
         Ok(())
     }
 
-    pub fn set_fee_bps(env: Env, new_fee_bps: u32) -> Result<(), BridgeError> {
+    pub fn set_fee_bps(env: Env, new_fee_bps: u32, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         check_not_paused(&env)?;
         if new_fee_bps > MAX_FEE_BPS {
@@ -544,6 +563,7 @@ impl OnboardingBridge {
         }
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         let old_fee_bps = read_fee_bps(&env);
         save_fee_bps(&env, &new_fee_bps);
         env.events()
@@ -556,10 +576,12 @@ impl OnboardingBridge {
         source: Address,
         asset: Address,
         limit_amount: i128,
+        nonce: Option<u64>,
     ) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         save_source_daily_limit(&env, &source, &asset, limit_amount);
         Ok(())
     }
@@ -577,6 +599,7 @@ impl OnboardingBridge {
         env: Env,
         asset: Address,
         max_fee_bps: u32,
+        nonce: Option<u64>,
     ) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         if max_fee_bps > MAX_FEE_BPS {
@@ -584,6 +607,7 @@ impl OnboardingBridge {
         }
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         save_asset_fee_cap(&env, &asset, max_fee_bps);
         Ok(())
     }
@@ -596,11 +620,12 @@ impl OnboardingBridge {
         Ok(read_asset_fee_cap(&env, &asset))
     }
 
-    pub fn set_fee_collector(env: Env, new_fee_collector: Address) -> Result<(), BridgeError> {
+    pub fn set_fee_collector(env: Env, new_fee_collector: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         check_not_paused(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         let old_collector = read_fee_collector(&env);
         save_fee_collector(&env, &new_fee_collector);
         env.events()
@@ -608,24 +633,26 @@ impl OnboardingBridge {
         Ok(())
     }
 
-    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), BridgeError> {
+    pub fn set_admin(env: Env, new_admin: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         check_not_paused(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         save_admin(&env, &new_admin);
         env.events()
             .publish(("AdminChanged", admin, new_admin.clone()), ());
         Ok(())
     }
 
-    pub fn set_minimum_amount(env: Env, amount: i128) -> Result<(), BridgeError> {
+    pub fn set_minimum_amount(env: Env, amount: i128, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         if amount < 0 {
             return Err(BridgeError::InvalidAmount);
         }
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         save_minimum_amount(&env, &amount);
         Ok(())
     }
@@ -635,7 +662,7 @@ impl OnboardingBridge {
         Ok(read_minimum_amount(&env))
     }
 
-    pub fn withdraw_fees(env: Env, asset: Address, amount: i128) -> Result<(), BridgeError> {
+    pub fn withdraw_fees(env: Env, asset: Address, amount: i128, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         check_not_paused(&env)?;
         if amount <= 0 {
@@ -643,6 +670,7 @@ impl OnboardingBridge {
         }
         let fee_collector = read_fee_collector(&env);
         fee_collector.require_auth();
+        consume_nonce(&env, &fee_collector, nonce)?;
 
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&env.current_contract_address(), &fee_collector, &amount);
@@ -694,6 +722,10 @@ impl OnboardingBridge {
         read_initialized(&env)
     }
 
+    pub fn query_nonce(env: Env, caller: Address) -> u64 {
+        read_nonce(&env, &caller)
+    }
+
     pub fn query_calculate_fee(env: Env, gross_amount: i128) -> (i128, i128) {
         let fee_bps = read_fee_bps(&env);
         let fee = calculate_fee(gross_amount, fee_bps);
@@ -711,19 +743,21 @@ impl OnboardingBridge {
         Ok(read_total_fees_collected(&env, &asset))
     }
 
-    pub fn pause(env: Env) -> Result<(), BridgeError> {
+    pub fn pause(env: Env, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish(("ContractPaused",), (admin,));
         Ok(())
     }
 
-    pub fn unpause(env: Env) -> Result<(), BridgeError> {
+    pub fn unpause(env: Env, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish(("ContractUnpaused",), (admin,));
         Ok(())
@@ -733,10 +767,11 @@ impl OnboardingBridge {
         read_paused(&env)
     }
 
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), BridgeError> {
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         env.events().publish(("Upgraded",), (admin, new_wasm_hash));
@@ -745,45 +780,55 @@ impl OnboardingBridge {
 
     // --- Blocklist / Allowlist ---
 
-    pub fn add_to_blocklist(env: Env, address: Address) -> Result<(), BridgeError> {
+    pub fn add_to_blocklist(env: Env, address: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
-        read_admin(&env).require_auth();
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.storage()
             .persistent()
             .set(&DataKey::Blocked(address), &true);
         Ok(())
     }
 
-    pub fn remove_from_blocklist(env: Env, address: Address) -> Result<(), BridgeError> {
+    pub fn remove_from_blocklist(env: Env, address: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
-        read_admin(&env).require_auth();
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.storage()
             .persistent()
             .remove(&DataKey::Blocked(address));
         Ok(())
     }
 
-    pub fn add_to_allowlist(env: Env, address: Address) -> Result<(), BridgeError> {
+    pub fn add_to_allowlist(env: Env, address: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
-        read_admin(&env).require_auth();
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.storage()
             .persistent()
             .set(&DataKey::Allowlisted(address), &true);
         Ok(())
     }
 
-    pub fn remove_from_allowlist(env: Env, address: Address) -> Result<(), BridgeError> {
+    pub fn remove_from_allowlist(env: Env, address: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
-        read_admin(&env).require_auth();
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.storage()
             .persistent()
             .remove(&DataKey::Allowlisted(address));
         Ok(())
     }
 
-    pub fn set_allowlist_mode(env: Env, enabled: bool) -> Result<(), BridgeError> {
+    pub fn set_allowlist_mode(env: Env, enabled: bool, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
-        read_admin(&env).require_auth();
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         env.storage()
             .instance()
             .set(&DataKey::AllowlistMode, &enabled);
@@ -807,6 +852,7 @@ impl OnboardingBridge {
         asset: Address,
         amount: i128,
         destination: Address,
+        nonce: Option<u64>,
     ) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         if amount <= 0 {
@@ -814,6 +860,7 @@ impl OnboardingBridge {
         }
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
 
         let token_client = token::Client::new(&env, &asset);
         let contract_balance = token_client.balance(&env.current_contract_address());
@@ -832,20 +879,22 @@ impl OnboardingBridge {
 
     // --- Asset Whitelist ---
 
-    pub fn add_asset(env: Env, asset: Address) -> Result<(), BridgeError> {
+    pub fn add_asset(env: Env, asset: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         let mut whitelist = read_whitelist(&env);
         whitelist.set(asset, true);
         save_whitelist(&env, &whitelist);
         Ok(())
     }
 
-    pub fn remove_asset(env: Env, asset: Address) -> Result<(), BridgeError> {
+    pub fn remove_asset(env: Env, asset: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
         let mut whitelist = read_whitelist(&env);
         whitelist.remove(asset);
         save_whitelist(&env, &whitelist);
