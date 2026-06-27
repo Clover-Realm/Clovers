@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol,
+    Val, Vec,
 };
 
 #[contracterror]
@@ -19,12 +19,9 @@ pub enum BridgeError {
     InsufficientReclaimable = 9,
     AssetNotWhitelisted = 10,
     DailyLimitExceeded = 11,
-
     DuplicateNonce = 12,
     TransactionExpired = 13,
-    EmergencyWithdrawDisabled = 14,
-    ProofRequiredForLargeAmount = 15,
-    InsufficientUserDeposit = 16,
+    LoyaltyTokenNotSet = 14,
 }
 
 #[contracttype]
@@ -44,45 +41,30 @@ pub enum DataKey {
     SourceDailyLimit(Address, Address),
     AssetFeeCap(Address),
     Nonce(Address),
-    EmergencyMode,
-    UserDeposit(Address, Address),
-    EmergencyProofThreshold,
-    BridgeConfig,
+    ReferralRate,
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
 const FEE_DENOMINATOR: i128 = 10_000;
-const INSTANCE_TTL_EXTEND: u32 = 518_400; // ~30 days in ledgers
+const MAX_BATCH_SIZE: u32 = 100;
 
 #[contracttype]
-#[derive(Clone, Debug)]
-pub struct BridgeConfigData {
-    pub admin: Address,
-    pub fee_collector: Address,
-    pub fee_bps: u32,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayerSig {
+    pub pubkey: BytesN<32>,
+    pub signature: BytesN<64>,
 }
 
-fn save_bridge_config(env: &Env, config: &BridgeConfigData) {
-    env.storage()
-        .instance()
-        .set(&DataKey::BridgeConfig, config);
-}
-
-fn read_bridge_config(env: &Env) -> BridgeConfigData {
-    env.storage()
-        .instance()
-        .get(&DataKey::BridgeConfig)
-        .unwrap_or_else(|| BridgeConfigData {
-            admin: read_admin(env),
-            fee_collector: read_fee_collector(env),
-            fee_bps: read_fee_bps(env),
-        })
-}
-
-fn extend_instance_ttl(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(INSTANCE_TTL_EXTEND, INSTANCE_TTL_EXTEND);
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelockEntry {
+    pub source: Address,
+    pub target: Address,
+    pub asset: Address,
+    pub amount: i128,
+    pub release_time: u64,
+    pub cliff_time: u64,
+    pub claimed: bool,
 }
 
 fn save_admin(env: &Env, admin: &Address) {
@@ -104,12 +86,32 @@ fn read_fee_collector(env: &Env) -> Address {
         .unwrap()
 }
 
+// --- Packed BridgeConfig accessors (fee_bps + paused + allowlist_mode in one entry) ---
+
+fn read_config(env: &Env) -> BridgeConfig {
+    env.storage()
+        .instance()
+        .get(&DataKey::Config)
+        .unwrap_or(BridgeConfig {
+            fee_bps: 0,
+            paused: false,
+            allowlist_mode: false,
+        })
+}
+
+fn save_config(env: &Env, config: &BridgeConfig) {
+    env.storage().instance().set(&DataKey::Config, config);
+}
+
 fn save_fee_bps(env: &Env, fee_bps: &u32) {
+    let mut config = read_config(env);
+    config.fee_bps = *fee_bps;
+    save_config(env, &config);
     env.storage().instance().set(&DataKey::FeeBps, fee_bps);
 }
 
 fn read_fee_bps(env: &Env) -> u32 {
-    env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
+    read_config(env).fee_bps
 }
 
 fn read_initialized(env: &Env) -> bool {
@@ -121,11 +123,11 @@ fn mark_initialized(env: &Env) {
 }
 
 fn save_minimum_amount(env: &Env, amount: &i128) {
-    let _ = (env, amount); // Unused - planned for future  
+    let _ = (env, amount);
 }
 
 fn read_minimum_amount(env: &Env) -> i128 {
-    let _ = env; // Unused - planned for future
+    let _ = env;
     0
 }
 
@@ -137,10 +139,14 @@ fn check_initialized(env: &Env) -> Result<(), BridgeError> {
 }
 
 fn read_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::Paused)
-        .unwrap_or(false)
+    read_config(env).paused
+}
+
+fn set_paused(env: &Env, paused: bool) {
+    let mut config = read_config(env);
+    config.paused = paused;
+    save_config(env, &config);
+    env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
 fn check_not_paused(env: &Env) -> Result<(), BridgeError> {
@@ -180,10 +186,16 @@ fn is_allowlisted(env: &Env, addr: &Address) -> bool {
 }
 
 fn allowlist_mode(env: &Env) -> bool {
+    read_config(env).allowlist_mode
+}
+
+fn set_allowlist_mode_flag(env: &Env, enabled: bool) {
+    let mut config = read_config(env);
+    config.allowlist_mode = enabled;
+    save_config(env, &config);
     env.storage()
         .instance()
-        .get(&DataKey::AllowlistMode)
-        .unwrap_or(false)
+        .set(&DataKey::AllowlistMode, &enabled);
 }
 
 fn check_access(env: &Env, target: &Address) -> Result<(), BridgeError> {
@@ -216,96 +228,80 @@ fn check_asset_whitelisted(env: &Env, asset: &Address) -> Result<(), BridgeError
     Ok(())
 }
 
-fn read_accrued_fees(env: &Env, asset: &Address) -> i128 {
+// --- Packed AssetCounters accessors (3 i128 counters in one persistent entry per asset) ---
+
+fn read_asset_counters(env: &Env, asset: &Address) -> AssetCounters {
     env.storage()
         .persistent()
-        .get(&DataKey::AccruedFees(asset.clone()))
-        .unwrap_or(0)
+        .get(&DataKey::AssetStats(asset.clone()))
+        .unwrap_or(AssetCounters {
+            accrued_fees: 0,
+            total_bridged: 0,
+            total_fees_collected: 0,
+        })
+}
+
+fn save_asset_counters(env: &Env, asset: &Address, counters: &AssetCounters) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::AssetStats(asset.clone()), counters);
+    env.storage()
+        .persistent()
+        .set(&DataKey::AccruedFees(asset.clone()), &counters.accrued_fees);
+    env.storage()
+        .persistent()
+        .set(&DataKey::TotalBridged(asset.clone()), &counters.total_bridged);
+    env.storage()
+        .persistent()
+        .set(
+            &DataKey::TotalFeesCollected(asset.clone()),
+            &counters.total_fees_collected,
+        );
+}
+
+fn read_accrued_fees(env: &Env, asset: &Address) -> i128 {
+    read_asset_counters(env, asset).accrued_fees
 }
 
 fn increment_accrued_fees(env: &Env, asset: &Address, amount: i128) {
-    let current = read_accrued_fees(env, asset);
-    env.storage()
-        .persistent()
-        .set(&DataKey::AccruedFees(asset.clone()), &(current + amount));
+    let mut c = read_asset_counters(env, asset);
+    c.accrued_fees += amount;
+    save_asset_counters(env, asset, &c);
 }
 
 fn decrement_accrued_fees(env: &Env, asset: &Address, amount: i128) {
-    let current = read_accrued_fees(env, asset);
-    env.storage()
-        .persistent()
-        .set(&DataKey::AccruedFees(asset.clone()), &(current - amount));
+    let mut c = read_asset_counters(env, asset);
+    c.accrued_fees -= amount;
+    save_asset_counters(env, asset, &c);
 }
 
 fn read_total_bridged(env: &Env, asset: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::TotalBridged(asset.clone()))
-        .unwrap_or(0)
+    read_asset_counters(env, asset).total_bridged
 }
 
 fn increment_total_bridged(env: &Env, asset: &Address, amount: i128) {
-    let current = read_total_bridged(env, asset);
-    env.storage()
-        .persistent()
-        .set(&DataKey::TotalBridged(asset.clone()), &(current + amount));
+    let mut c = read_asset_counters(env, asset);
+    c.total_bridged += amount;
+    save_asset_counters(env, asset, &c);
 }
 
 fn read_total_fees_collected(env: &Env, asset: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::TotalFeesCollected(asset.clone()))
-        .unwrap_or(0)
+    read_asset_counters(env, asset).total_fees_collected
 }
 
 fn increment_total_fees_collected(env: &Env, asset: &Address, amount: i128) {
-    let current = read_total_fees_collected(env, asset);
-    env.storage()
-        .persistent()
-        .set(&DataKey::TotalFeesCollected(asset.clone()), &(current + amount));
+    let mut c = read_asset_counters(env, asset);
+    c.total_fees_collected += amount;
+    save_asset_counters(env, asset, &c);
 }
 
-fn save_source_daily_limit(env: &Env, source: &Address, asset: &Address, limit: i128) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::SourceDailyLimit(source.clone(), asset.clone()), &limit);
-}
-
-fn read_source_daily_limit(env: &Env, source: &Address, asset: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::SourceDailyLimit(source.clone(), asset.clone()))
-        .unwrap_or(0)
-}
-
-fn check_daily_limit(env: &Env, source: &Address, asset: &Address, amount: i128) -> Result<(), BridgeError> {
-    let limit = read_source_daily_limit(env, source, asset);
-    if limit > 0 && amount > limit {
-        return Err(BridgeError::DailyLimitExceeded);
-    }
-    Ok(())
-}
-
-fn save_asset_fee_cap(env: &Env, asset: &Address, max_fee_bps: u32) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::AssetFeeCap(asset.clone()), &max_fee_bps);
-}
-
-fn read_asset_fee_cap(env: &Env, asset: &Address) -> u32 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::AssetFeeCap(asset.clone()))
-        .unwrap_or(MAX_FEE_BPS)
-}
-
-#[inline(always)]
-fn get_effective_fee_bps_legacy(env: &Env, asset: &Address, global_fee_bps: u32) -> u32 {
-    if global_fee_bps == 0 {
-        return 0;
-    }
-    let cap = read_asset_fee_cap(env, asset);
-    if global_fee_bps < cap { global_fee_bps } else { cap }
+/// Atomically update all three counters in a single storage read+write
+fn update_asset_counters(env: &Env, asset: &Address, fees: i128, bridged: i128) {
+    let mut c = read_asset_counters(env, asset);
+    c.accrued_fees += fees;
+    c.total_bridged += bridged;
+    c.total_fees_collected += fees;
+    save_asset_counters(env, asset, &c);
 }
 
 fn read_nonce(env: &Env, caller: &Address) -> u64 {
@@ -330,41 +326,17 @@ fn consume_nonce(env: &Env, caller: &Address, nonce: Option<u64>) -> Result<(), 
     Ok(())
 }
 
-// --- Emergency mode helpers ---
+// --- Referral rate helpers ---
 
-fn read_emergency_mode(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::EmergencyMode)
-        .unwrap_or(false)
+fn save_referral_rate(env: &Env, bps: u32) {
+    env.storage().instance().set(&DataKey::ReferralRate, &bps);
 }
 
-fn read_user_deposit(env: &Env, user: &Address, asset: &Address) -> i128 {
+fn read_referral_rate(env: &Env) -> u32 {
     env.storage()
-        .persistent()
-        .get(&DataKey::UserDeposit(user.clone(), asset.clone()))
+        .instance()
+        .get(&DataKey::ReferralRate)
         .unwrap_or(0)
-}
-
-fn increment_user_deposit(env: &Env, user: &Address, asset: &Address, amount: i128) {
-    let current = read_user_deposit(env, user, asset);
-    env.storage()
-        .persistent()
-        .set(&DataKey::UserDeposit(user.clone(), asset.clone()), &(current + amount));
-}
-
-fn decrement_user_deposit(env: &Env, user: &Address, asset: &Address, amount: i128) {
-    let current = read_user_deposit(env, user, asset);
-    env.storage()
-        .persistent()
-        .set(&DataKey::UserDeposit(user.clone(), asset.clone()), &(current - amount));
-}
-
-fn read_emergency_proof_threshold(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&DataKey::EmergencyProofThreshold)
-        .unwrap_or(1_000_000_0000000i128) // default 1M stroops
 }
 
 // --- Cross-chain relayer registry ---
@@ -490,6 +462,89 @@ fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32
     global_fee_bps.min(cap)
 }
 
+// --- Fee tier helpers ---
+
+fn save_fee_tiers(env: &Env, tiers: &Vec<FeeTier>) {
+    env.storage().instance().set(&DataKey::FeeTiers, tiers);
+}
+
+fn read_fee_tiers(env: &Env) -> Option<Vec<FeeTier>> {
+    env.storage().instance().get(&DataKey::FeeTiers)
+}
+
+fn read_source_bridged_volume(env: &Env, source: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::SourceBridgedVolume(source.clone()))
+        .unwrap_or(0)
+}
+
+fn increment_source_bridged_volume(env: &Env, source: &Address, amount: i128) {
+    let current = read_source_bridged_volume(env, source);
+    env.storage()
+        .persistent()
+        .set(&DataKey::SourceBridgedVolume(source.clone()), &(current + amount));
+}
+
+fn get_tiered_fee_bps(env: &Env, source: &Address, fallback_bps: u32) -> u32 {
+    if let Some(tiers) = read_fee_tiers(env) {
+        let volume = read_source_bridged_volume(env, source);
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if volume >= tier.min_volume && volume <= tier.max_volume {
+                return tier.fee_bps;
+            }
+        }
+    }
+    fallback_bps
+}
+
+fn find_current_tier(env: &Env, source: &Address) -> Option<FeeTier> {
+    if let Some(tiers) = read_fee_tiers(env) {
+        let volume = read_source_bridged_volume(env, source);
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if volume >= tier.min_volume && volume <= tier.max_volume {
+                return Some(tier);
+            }
+        }
+    }
+    None
+}
+
+// --- Loyalty token helpers ---
+
+fn save_loyalty_token(env: &Env, token: &Address) {
+    env.storage().instance().set(&DataKey::LoyaltyToken, token);
+}
+
+fn read_loyalty_token(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::LoyaltyToken)
+}
+
+fn save_loyalty_amount_per_fund(env: &Env, amount: &i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::LoyaltyAmountPerFund, amount);
+}
+
+fn read_loyalty_amount_per_fund(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::LoyaltyAmountPerFund)
+        .unwrap_or(0)
+}
+
+fn mint_loyalty_tokens(env: &Env, recipient: &Address) {
+    if let Some(loyalty_token) = read_loyalty_token(env) {
+        let amount = read_loyalty_amount_per_fund(env);
+        if amount > 0 {
+            let token_client = token::Client::new(env, &loyalty_token);
+            token_client.transfer(&env.current_contract_address(), recipient, &amount);
+        }
+    }
+}
+
 #[contract]
 pub struct OnboardingBridge;
 
@@ -554,8 +609,9 @@ impl OnboardingBridge {
         let contract_addr = env.current_contract_address();
         token_client.transfer(&source, &contract_addr, &amount);
 
-        let config = read_bridge_config(&env);
-        let effective_fee_bps = get_effective_fee_bps(&env, &asset, config.fee_bps);
+        let global_fee_bps = read_fee_bps(&env);
+        let tiered_fee_bps = get_tiered_fee_bps(&env, &source, global_fee_bps);
+        let effective_fee_bps = get_effective_fee_bps(&env, &asset, tiered_fee_bps);
         let fee = calculate_fee(amount, effective_fee_bps);
         let net_amount = amount - fee;
 
@@ -567,7 +623,10 @@ impl OnboardingBridge {
         increment_accrued_fees(&env, &asset, fee);
         increment_total_bridged(&env, &asset, net_amount);
         increment_total_fees_collected(&env, &asset, fee);
-        extend_instance_ttl(&env);
+        increment_source_bridged_volume(&env, &source, amount);
+
+        mint_loyalty_tokens(&env, &source);
+
         env.events()
             .publish(("CAddressFunded", source, target), (amount, fee, asset));
         Ok(())
@@ -609,6 +668,11 @@ impl OnboardingBridge {
         }
 
         let token_client = token::Client::new(&env, &asset);
+        token_client.transfer(&source, &env.current_contract_address(), &total);
+
+        // Cache effective fee bps once — same asset for entire batch
+        let fee_bps = read_fee_bps(&env);
+        let effective_fee_bps = get_effective_fee_bps(&env, &asset, fee_bps);
         let contract_addr = env.current_contract_address();
         token_client.transfer(&source, &contract_addr, &total);
 
@@ -617,6 +681,11 @@ impl OnboardingBridge {
         let mut num_success = 0u32;
         let mut num_failures = 0u32;
         let mut refund_amount = 0i128;
+        let mut total_fees = 0i128;
+        let mut total_bridged = 0i128;
+
+        // Aggregate net amounts per target to combine transfers to the same address
+        let mut aggregated: Map<Address, i128> = Map::new(&env);
 
         for i in 0..targets.len() {
             let target = targets.get(i).unwrap();
@@ -635,17 +704,32 @@ impl OnboardingBridge {
                 continue;
             }
 
-            if net_amount > 0 {
-                token_client.transfer(&contract_addr, &target, &net_amount);
-            }
             num_success += 1;
-            increment_accrued_fees(&env, &asset, fee);
-            increment_total_bridged(&env, &asset, net_amount);
-            increment_total_fees_collected(&env, &asset, fee);
+            total_fees += fee;
+            total_bridged += net_amount;
+
+            if net_amount > 0 {
+                let existing = aggregated.get(target.clone()).unwrap_or(0);
+                aggregated.set(target.clone(), existing + net_amount);
+            }
+
             env.events().publish(
                 ("CAddressFunded", source.clone(), target),
                 (amount, fee, asset.clone()),
             );
+        }
+
+        // Execute one transfer per unique target instead of N
+        for target_addr in aggregated.keys() {
+            let combined_amount = aggregated.get(target_addr.clone()).unwrap();
+            if combined_amount > 0 {
+                token_client.transfer(&contract_addr, &target_addr, &combined_amount);
+            }
+        }
+
+        // Batch-update all counters in a single storage read+write
+        if total_fees > 0 || total_bridged > 0 {
+            update_asset_counters(&env, &asset, total_fees, total_bridged);
         }
 
         if refund_amount > 0 {
@@ -797,6 +881,82 @@ impl OnboardingBridge {
         Ok(read_fee_bps(&env))
     }
 
+    pub fn set_referral_rate(env: Env, bps: u32, nonce: Option<u64>) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        if bps > MAX_FEE_BPS {
+            return Err(BridgeError::FeeTooHigh);
+        }
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
+        save_referral_rate(&env, bps);
+        env.events().publish(("ReferralRateChanged", bps), ());
+        Ok(())
+    }
+
+    pub fn query_referral_rate(env: Env) -> Result<u32, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_referral_rate(&env))
+    }
+
+    pub fn fund_c_address_with_referral(
+        env: Env,
+        source: Address,
+        target: Address,
+        asset: Address,
+        amount: i128,
+        referrer: Option<Address>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        check_not_paused(&env)?;
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        check_access(&env, &target)?;
+        check_asset_whitelisted(&env, &asset)?;
+        check_daily_limit(&env, &source, &asset, amount)?;
+        source.require_auth();
+
+        let token_client = token::Client::new(&env, &asset);
+        token_client.transfer(&source, &env.current_contract_address(), &amount);
+
+        let global_fee_bps = read_fee_bps(&env);
+        let effective_fee_bps = get_effective_fee_bps(&env, &asset, global_fee_bps);
+        let fee = calculate_fee(amount, effective_fee_bps);
+        let net_amount = amount - fee;
+
+        if net_amount > 0 {
+            token_client.transfer(&env.current_contract_address(), &target, &net_amount);
+        }
+
+        // Split fee: referral portion goes directly to referrer
+        let referral_fee = if let Some(ref referrer_addr) = referrer {
+            let referral_rate = read_referral_rate(&env);
+            let rf = (fee * referral_rate as i128) / FEE_DENOMINATOR;
+            if rf > 0 {
+                token_client.transfer(&env.current_contract_address(), referrer_addr, &rf);
+                env.events().publish(
+                    ("ReferralPaid", source.clone(), referrer_addr.clone()),
+                    (rf, asset.clone()),
+                );
+            }
+            rf
+        } else {
+            0
+        };
+
+        let protocol_fee = fee - referral_fee;
+        increment_accrued_fees(&env, &asset, protocol_fee);
+        increment_total_bridged(&env, &asset, net_amount);
+        increment_total_fees_collected(&env, &asset, fee);
+
+        env.events().publish(
+            ("CAddressFunded", source, target),
+            (amount, fee, asset),
+        );
+        Ok(())
+    }
+
     pub fn query_fee_collector(env: Env) -> Result<Address, BridgeError> {
         check_initialized(&env)?;
         Ok(read_fee_collector(&env))
@@ -859,7 +1019,7 @@ impl OnboardingBridge {
         let admin = read_admin(&env);
         admin.require_auth();
         consume_nonce(&env, &admin, nonce)?;
-        env.storage().instance().set(&DataKey::Paused, &true);
+        set_paused(&env, true);
         env.events().publish(("ContractPaused",), (admin,));
         Ok(())
     }
@@ -869,7 +1029,7 @@ impl OnboardingBridge {
         let admin = read_admin(&env);
         admin.require_auth();
         consume_nonce(&env, &admin, nonce)?;
-        env.storage().instance().set(&DataKey::Paused, &false);
+        set_paused(&env, false);
         env.events().publish(("ContractUnpaused",), (admin,));
         Ok(())
     }
@@ -940,9 +1100,7 @@ impl OnboardingBridge {
         let admin = read_admin(&env);
         admin.require_auth();
         consume_nonce(&env, &admin, nonce)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::AllowlistMode, &enabled);
+        set_allowlist_mode_flag(&env, enabled);
         Ok(())
     }
 
@@ -1022,81 +1180,75 @@ impl OnboardingBridge {
         Ok(read_whitelist(&env).keys())
     }
 
-    // --- Emergency Withdraw ---
+    // --- Loyalty Token ---
 
-    pub fn set_emergency_mode(env: Env, enabled: bool, nonce: Option<u64>) -> Result<(), BridgeError> {
-        check_initialized(&env)?;
-        let admin = read_admin(&env);
-        admin.require_auth();
-        consume_nonce(&env, &admin, nonce)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::EmergencyMode, &enabled);
-        env.events()
-            .publish(("EmergencyModeChanged",), (admin, enabled));
-        Ok(())
-    }
-
-    pub fn set_emergency_proof_threshold(
+    pub fn set_loyalty_token(
         env: Env,
-        threshold: i128,
-        nonce: Option<u64>,
+        token: Address,
+        amount_per_fund: i128,
     ) -> Result<(), BridgeError> {
         check_initialized(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
-        consume_nonce(&env, &admin, nonce)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::EmergencyProofThreshold, &threshold);
-        Ok(())
-    }
-
-    pub fn emergency_withdraw(
-        env: Env,
-        user: Address,
-        asset: Address,
-        amount: i128,
-        proof: Option<Bytes>,
-    ) -> Result<(), BridgeError> {
-        check_initialized(&env)?;
-        let is_paused = read_paused(&env);
-        let is_emergency = read_emergency_mode(&env);
-        if !is_paused && !is_emergency {
-            return Err(BridgeError::EmergencyWithdrawDisabled);
-        }
-        if amount <= 0 {
+        if amount_per_fund < 0 {
             return Err(BridgeError::InvalidAmount);
         }
-        user.require_auth();
-
-        let threshold = read_emergency_proof_threshold(&env);
-        if amount > threshold && proof.is_none() {
-            return Err(BridgeError::ProofRequiredForLargeAmount);
-        }
-
-        let user_deposit = read_user_deposit(&env, &user, &asset);
-        if user_deposit < amount {
-            return Err(BridgeError::InsufficientUserDeposit);
-        }
-
-        decrement_user_deposit(&env, &user, &asset, amount);
-
-        let token_client = token::Client::new(&env, &asset);
-        token_client.transfer(&env.current_contract_address(), &user, &amount);
-
+        save_loyalty_token(&env, &token);
+        save_loyalty_amount_per_fund(&env, &amount_per_fund);
         env.events()
-            .publish(("EmergencyWithdrawal", user, asset), (amount,));
+            .publish(("LoyaltyTokenSet", admin), (token, amount_per_fund));
         Ok(())
     }
 
-    pub fn query_user_deposit(env: Env, user: Address, asset: Address) -> Result<i128, BridgeError> {
+    pub fn query_loyalty_token(env: Env) -> Result<(Address, i128), BridgeError> {
         check_initialized(&env)?;
-        Ok(read_user_deposit(&env, &user, &asset))
+        let token = read_loyalty_token(&env).ok_or(BridgeError::LoyaltyTokenNotSet)?;
+        let amount = read_loyalty_amount_per_fund(&env);
+        Ok((token, amount))
     }
 
-    pub fn query_is_emergency_mode(env: Env) -> bool {
-        read_emergency_mode(&env)
+    // --- Tiered Fees ---
+
+    pub fn set_fee_tiers(env: Env, tiers: Vec<FeeTier>) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if tier.fee_bps > MAX_FEE_BPS {
+                return Err(BridgeError::FeeTooHigh);
+            }
+        }
+        save_fee_tiers(&env, &tiers);
+        env.events()
+            .publish(("FeeTiersSet", admin), (tiers.len(),));
+        Ok(())
+    }
+
+    pub fn query_fee_tiers(env: Env) -> Result<Vec<FeeTier>, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_fee_tiers(&env).unwrap_or_else(|| {
+            let mut tiers = Vec::new(&env);
+            let fee_bps = read_fee_bps(&env);
+            tiers.push_back(FeeTier {
+                min_volume: 0,
+                max_volume: i128::MAX,
+                fee_bps,
+            });
+            tiers
+        }))
+    }
+
+    pub fn query_current_tier(env: Env, source: Address) -> Result<FeeTier, BridgeError> {
+        check_initialized(&env)?;
+        Ok(find_current_tier(&env, &source).unwrap_or_else(|| {
+            let fee_bps = read_fee_bps(&env);
+            FeeTier {
+                min_volume: 0,
+                max_volume: i128::MAX,
+                fee_bps,
+            }
+        }))
     }
 
     // --- Cross-chain Onboarding ---
@@ -1186,9 +1338,7 @@ impl OnboardingBridge {
         if net_amount > 0 {
             token_client.transfer(&env.current_contract_address(), &target, &net_amount);
         }
-        increment_accrued_fees(&env, &asset, fee);
-        increment_total_bridged(&env, &asset, net_amount);
-        increment_total_fees_collected(&env, &asset, fee);
+        update_asset_counters(&env, &asset, fee, net_amount);
 
         env.events().publish(
             ("CrossChainFunded", target),
@@ -1316,9 +1466,7 @@ impl OnboardingBridge {
         if net_amount > 0 {
             token_client.transfer(&env.current_contract_address(), &entry.target, &net_amount);
         }
-        increment_accrued_fees(&env, &entry.asset, fee);
-        increment_total_bridged(&env, &entry.asset, net_amount);
-        increment_total_fees_collected(&env, &entry.asset, fee);
+        update_asset_counters(&env, &entry.asset, fee, net_amount);
 
         env.events().publish(
             ("TimelockClaimed", entry.target),
@@ -1334,3 +1482,9 @@ impl OnboardingBridge {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod benchmarks;
+
+#[cfg(test)]
+mod integration_tests;
