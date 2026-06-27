@@ -2,7 +2,7 @@ use crate::{BridgeError, OnboardingBridge};
 
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, Ledger},
     Address, Bytes, BytesN, Env, IntoVal, Vec,
 };
 
