@@ -1212,3 +1212,294 @@ fn test_admin_changed_emits_event() {
     let (contract_id, _topics, _data) = &events.get(events.len() - 1).unwrap();
     assert_eq!(contract_id, &bridge_id);
 }
+
+// --------- batch_fund_c_address edge case tests ---------
+
+fn setup_batch(env: &Env) -> (crate::OnboardingBridgeClient, Address, Address, Address) {
+    let (bridge_id, token_id) = register_all_contracts(env);
+    let bridge = create_bridge_client(env, &bridge_id);
+    let (admin, user, fee_collector) = create_test_users(env);
+    init_token(env, &token_id, &admin);
+    bridge.initialize(&admin, &fee_collector, &100u32); // 1% fee
+    bridge.add_asset(&token_id);
+    mint_tokens(env, &token_id, &user, 1_000_000i128);
+    (bridge, user, token_id, admin)
+}
+
+/// Helper: count events from bridge with a given topic string prefix.
+fn count_events_with_topic(env: &Env, bridge_id: &Address, topic: &str) -> u32 {
+    use soroban_sdk::IntoVal;
+    let topic_val: soroban_sdk::Val = topic.into_val(env);
+    let mut count = 0u32;
+    for event in env.events().all().iter() {
+        let (cid, topics, _) = event;
+        if &cid == bridge_id && topics.len() > 0 {
+            if let Ok(t) = topics.get(0) {
+                if t == topic_val {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Empty targets array — returns Ok immediately, no BatchCompleted event.
+#[test]
+fn test_batch_empty_array_no_events() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let event_count_before = env.events().all().len();
+
+    let targets: Vec<Address> = Vec::new(&env);
+    let amounts: Vec<i128> = Vec::new(&env);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    // No new events emitted — the contract returns early before even emitting BatchCompleted.
+    assert_eq!(env.events().all().len(), event_count_before);
+    // Source balance unchanged.
+    assert_eq!(check_balance(&env, &token_id, &user), 1_000_000i128);
+}
+
+/// Single target — boundary case; correct fee and CAddressFunded + BatchCompleted events.
+#[test]
+fn test_batch_single_target() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    let target = Address::generate(&env);
+    let targets = Vec::from_array(&env, [target.clone()]);
+    let amounts = Vec::from_array(&env, [1000i128]);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    assert_eq!(check_balance(&env, &token_id, &target), 990i128); // 1% fee
+    assert_eq!(check_balance(&env, &token_id, &user), 999_000i128);
+
+    // Exactly 1 CAddressFunded and 1 BatchCompleted emitted.
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 1);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchCompleted"), 1);
+}
+
+/// Duplicate target addresses — each entry is processed independently.
+#[test]
+fn test_batch_duplicate_targets() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    let target = Address::generate(&env);
+    let targets = Vec::from_array(&env, [target.clone(), target.clone(), target.clone()]);
+    let amounts = Vec::from_array(&env, [1000i128, 2000i128, 3000i128]);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    // Net: 990 + 1980 + 2970 = 5940
+    assert_eq!(check_balance(&env, &token_id, &target), 5940i128);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 3);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchCompleted"), 1);
+}
+
+/// Target is same as source — source receives net amount back (self-fund).
+#[test]
+fn test_batch_target_is_source() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    // user sends 1000 to themselves; they pay fee, so net back is 990.
+    let targets = Vec::from_array(&env, [user.clone()]);
+    let amounts = Vec::from_array(&env, [1000i128]);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    // Started with 1_000_000. Paid 1000, received 990. Net: 999_990.
+    assert_eq!(check_balance(&env, &token_id, &user), 999_990i128);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 1);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchCompleted"), 1);
+}
+
+/// Target is the contract itself — contract receives the net amount.
+#[test]
+fn test_batch_target_is_contract() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    let targets = Vec::from_array(&env, [bridge_id.clone()]);
+    let amounts = Vec::from_array(&env, [1000i128]);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    // Contract should hold 1000 total (990 transferred to itself as target + 10 accrued fee).
+    assert_eq!(check_balance(&env, &token_id, &bridge_id), 1000i128);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 1);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchCompleted"), 1);
+}
+
+/// Zero amount in array — rejected with InvalidAmount before any transfer.
+#[test]
+fn test_batch_zero_amount_rejected() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+
+    let t1 = Address::generate(&env);
+    let t2 = Address::generate(&env);
+    let targets = Vec::from_array(&env, [t1.clone(), t2.clone()]);
+    let amounts = Vec::from_array(&env, [500i128, 0i128]);
+
+    assert_eq!(
+        bridge.try_batch_fund_c_address(&user, &targets, &amounts, &token_id),
+        Err(Ok(BridgeError::InvalidAmount))
+    );
+    // No tokens moved — user balance intact.
+    assert_eq!(check_balance(&env, &token_id, &user), 1_000_000i128);
+    assert_eq!(check_balance(&env, &token_id, &t1), 0i128);
+}
+
+/// Negative amount in array — also rejected as InvalidAmount.
+#[test]
+fn test_batch_negative_amount_rejected() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+
+    let target = Address::generate(&env);
+    let targets = Vec::from_array(&env, [target]);
+    let amounts = Vec::from_array(&env, [-1i128]);
+
+    assert_eq!(
+        bridge.try_batch_fund_c_address(&user, &targets, &amounts, &token_id),
+        Err(Ok(BridgeError::InvalidAmount))
+    );
+    assert_eq!(check_balance(&env, &token_id, &user), 1_000_000i128);
+}
+
+/// Fee causes net_amount == 0 — transfer is skipped, fee still accrues.
+/// At 1000 bps (10%), an amount of 9 → fee=0 (rounds down), net=9, transfer happens.
+/// At 1000 bps, amount=1 → fee=0 (1*1000/10000 = 0), net=1. 
+/// To get net==0 we need fee_bps=10000 which exceeds max. Instead, use fee_bps=1000 and
+/// amount=1: fee = 1*1000/10000 = 0, net = 1. Can't get net=0 with valid fee_bps.
+/// The contract MAX_FEE_BPS is 1000 (10%), so with amount=1: fee=0, net=1.
+/// With amount=9 and fee_bps=1000: fee=0, net=9.
+/// The only way net rounds to 0 is if the math rounds to exactly amount.
+/// This is mathematically impossible with fee_bps <= 1000 for integer amount >= 1.
+/// Test documents this invariant: net is always > 0 for any valid input.
+#[test]
+fn test_batch_fee_never_produces_zero_net_within_max_fee_bps() {
+    let env = Env::default();
+    let (bridge, user, token_id, admin) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    // Set max fee 1000 bps (10%).
+    bridge.set_fee_bps(&1000u32);
+
+    // Amount=1: fee = 1*1000/10000 = 0, net = 1. Transfer happens.
+    let target = Address::generate(&env);
+    let targets = Vec::from_array(&env, [target.clone()]);
+    let amounts = Vec::from_array(&env, [1i128]);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    assert_eq!(check_balance(&env, &token_id, &target), 1i128);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 1);
+    let _ = admin;
+}
+
+/// Mismatched arrays — rejected with MismatchedArrays.
+#[test]
+fn test_batch_mismatched_arrays() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+
+    let t1 = Address::generate(&env);
+    let targets = Vec::from_array(&env, [t1]);
+    let amounts = Vec::from_array(&env, [500i128, 300i128]);
+
+    assert_eq!(
+        bridge.try_batch_fund_c_address(&user, &targets, &amounts, &token_id),
+        Err(Ok(BridgeError::MismatchedArrays))
+    );
+}
+
+/// Blocked target in batch — that entry is skipped and refunded, others succeed.
+/// BatchTransferFailed emitted for the blocked one, CAddressFunded for successful ones,
+/// BatchCompleted at the end reflecting counts.
+#[test]
+fn test_batch_blocked_target_skipped_and_refunded() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    let good = Address::generate(&env);
+    let blocked = Address::generate(&env);
+    bridge.add_to_blocklist(&blocked);
+
+    let targets = Vec::from_array(&env, [good.clone(), blocked.clone()]);
+    let amounts = Vec::from_array(&env, [1000i128, 500i128]);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    // Good target receives net amount (1% fee on 1000 = 990).
+    assert_eq!(check_balance(&env, &token_id, &good), 990i128);
+    // Blocked target receives nothing; 500 refunded to source.
+    assert_eq!(check_balance(&env, &token_id, &blocked), 0i128);
+    // Source paid 1500 total, got 500 back: net cost 1000.
+    assert_eq!(check_balance(&env, &token_id, &user), 999_000i128);
+
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 1);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchTransferFailed"), 1);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchCompleted"), 1);
+}
+
+/// All targets blocked — all refunded, only BatchTransferFailed + BatchCompleted emitted.
+#[test]
+fn test_batch_all_blocked_full_refund() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    let t1 = Address::generate(&env);
+    let t2 = Address::generate(&env);
+    bridge.add_to_blocklist(&t1);
+    bridge.add_to_blocklist(&t2);
+
+    let targets = Vec::from_array(&env, [t1.clone(), t2.clone()]);
+    let amounts = Vec::from_array(&env, [400i128, 600i128]);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+
+    // Full refund — source balance unchanged.
+    assert_eq!(check_balance(&env, &token_id, &user), 1_000_000i128);
+    assert_eq!(check_balance(&env, &token_id, &t1), 0i128);
+    assert_eq!(check_balance(&env, &token_id, &t2), 0i128);
+
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 0);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchTransferFailed"), 2);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchCompleted"), 1);
+}
+
+/// Large batch (100 targets) — verifies all succeed, correct event count, correct balances.
+#[test]
+fn test_batch_100_targets() {
+    let env = Env::default();
+    let (bridge, user, token_id, _) = setup_batch(&env);
+    let bridge_id = bridge.address.clone();
+
+    // Give user enough tokens: 100 * 1000 = 100_000.
+    mint_tokens(&env, &token_id, &user, 100_000i128);
+
+    let mut targets_vec = Vec::new(&env);
+    let mut amounts_vec = Vec::new(&env);
+    let mut target_addrs: soroban_sdk::Vec<Address> = Vec::new(&env);
+    for _ in 0..100 {
+        let t = Address::generate(&env);
+        target_addrs.push_back(t.clone());
+        targets_vec.push_back(t);
+        amounts_vec.push_back(1000i128);
+    }
+
+    bridge.batch_fund_c_address(&user, &targets_vec, &amounts_vec, &token_id);
+
+    // Each target receives 990 (1% fee on 1000).
+    for i in 0..100 {
+        assert_eq!(check_balance(&env, &token_id, &target_addrs.get(i).unwrap()), 990i128);
+    }
+    // Source spent 100_000 tokens from the extra mint.
+    assert_eq!(check_balance(&env, &token_id, &user), 1_000_000i128); // original unchanged
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "CAddressFunded"), 100);
+    assert_eq!(count_events_with_topic(&env, &bridge_id, "BatchCompleted"), 1);
+}

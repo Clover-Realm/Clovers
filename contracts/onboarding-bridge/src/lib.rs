@@ -34,6 +34,8 @@ pub enum DataKey {
     AssetWhitelist,
     TotalBridged(Address),
     TotalFeesCollected(Address),
+    SourceDailyLimit(Address, Address),
+    AssetFeeCap(Address),
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -206,6 +208,45 @@ fn increment_total_fees_collected(env: &Env, asset: &Address, amount: i128) {
     env.storage()
         .persistent()
         .set(&DataKey::TotalFeesCollected(asset.clone()), &(current + amount));
+}
+
+fn save_source_daily_limit(env: &Env, source: &Address, asset: &Address, limit: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::SourceDailyLimit(source.clone(), asset.clone()), &limit);
+}
+
+fn read_source_daily_limit(env: &Env, source: &Address, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::SourceDailyLimit(source.clone(), asset.clone()))
+        .unwrap_or(0)
+}
+
+fn check_daily_limit(env: &Env, source: &Address, asset: &Address, amount: i128) -> Result<(), BridgeError> {
+    let limit = read_source_daily_limit(env, source, asset);
+    if limit > 0 && amount > limit {
+        return Err(BridgeError::DailyLimitExceeded);
+    }
+    Ok(())
+}
+
+fn save_asset_fee_cap(env: &Env, asset: &Address, max_fee_bps: u32) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::AssetFeeCap(asset.clone()), &max_fee_bps);
+}
+
+fn read_asset_fee_cap(env: &Env, asset: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AssetFeeCap(asset.clone()))
+        .unwrap_or(MAX_FEE_BPS)
+}
+
+fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32 {
+    let cap = read_asset_fee_cap(env, asset);
+    if global_fee_bps < cap { global_fee_bps } else { cap }
 }
 
 #[contract]
