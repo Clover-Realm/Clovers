@@ -1242,3 +1242,6 @@ mod benchmarks;
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod token_e2e_tests;
