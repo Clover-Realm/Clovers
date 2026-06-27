@@ -4,19 +4,135 @@ A Soroban smart contract + TypeScript SDK that lets anyone fund a Soroban smart 
 
 ## Architecture
 
+```mermaid
+graph TD
+    User["User\n(G-address / CEX / Card)"]
+
+    subgraph On-Ramps
+        CEX["CEX Withdrawal\n(memo routing)"]
+        Moonpay["Moonpay"]
+        Transak["Transak"]
+    end
+
+    subgraph Soroban
+        Bridge["OnboardingBridge\nContract"]
+        CAddr["Target C-Address\n(smart account)"]
+        FeePool["Accumulated Fees\n(in contract)"]
+    end
+
+    subgraph Roles
+        Admin["Admin Keypair\n(set_fee_bps, set_admin,\nset_fee_collector, upgrade)"]
+        FeeCol["Fee Collector Keypair\n(withdraw_fees only)"]
+    end
+
+    User -->|direct fund| Bridge
+    CEX -->|fund_c_address| Bridge
+    Moonpay -->|fund_c_address| Bridge
+    Transak -->|fund_c_address| Bridge
+
+    Bridge -->|net amount| CAddr
+    Bridge -->|fee accrual| FeePool
+    FeePool -->|withdraw_fees| FeeCol
+
+    Admin -.->|admin calls| Bridge
+    FeeCol -.->|fee withdrawal| FeePool
 ```
-User (G-address / CEX / Credit Card)
-            │
-            ▼
-  ┌─────────────────────┐
-  │ OnboardingBridge    │  ← Soroban smart contract
-  │  - routes funds     │
-  │  - collects fee     │
-  │  - emits events     │
-  └────────┬────────────┘
-           │
-           ▼
-  Target C-address (Soroban smart account)
+
+### Contract (`contracts/onboarding-bridge/`)
+
+| Function | Description |
+|---|---|
+| `initialize` | Set admin, fee collector, and fee rate |
+| `fund_c_address` | Route tokens from source to a C-address |
+| `batch_fund_c_address` | Fund multiple C-addresses in one tx |
+| `set_fee_bps` / `set_fee_collector` / `set_admin` | Admin management |
+| `withdraw_fees` | Fee collector drains accumulated fees |
+| `query_fee_bps` / `query_fee_collector` / `query_admin` | Read config |
+| `query_balance` | Check any address's token balance |
+| `query_is_initialized` | Check if contract is initialized |
+
+### Transaction Flow
+
+```mermaid
+sequenceDiagram
+    participant S as Source (G-address)
+    participant SDK as SDK / Client
+    participant C as Bridge Contract
+    participant T as Target C-Address
+    participant F as Fee Pool
+
+    note over SDK,C: fund_c_address
+    SDK->>C: fund_c_address(source, target, asset, amount)
+    C->>C: check initialized, not paused
+    C->>C: check access (blocklist / allowlist)
+    C->>C: check asset whitelisted
+    C->>C: check daily limit
+    C->>S: require_auth()
+    S-->>C: ✓ authorized
+    C->>C: token.transfer(source → contract, amount)
+    C->>C: fee = amount × fee_bps / 10000
+    C->>T: token.transfer(contract → target, amount − fee)
+    C->>F: increment accrued_fees
+    C->>C: emit CAddressFunded event
+
+    note over SDK,C: batch_fund_c_address
+    SDK->>C: batch_fund_c_address(source, targets[], amounts[], asset)
+    C->>S: require_auth()
+    S-->>C: ✓ authorized
+    C->>C: token.transfer(source → contract, Σ amounts)
+    loop each (target, amount)
+        C->>C: check access for target
+        alt access ok
+            C->>T: token.transfer(contract → target, amount − fee)
+            C->>F: increment accrued_fees
+            C->>C: emit CAddressFunded
+        else blocked / not allowlisted
+            C->>C: refund_amount += amount
+            C->>C: emit BatchTransferFailed
+        end
+    end
+    C->>S: token.transfer(contract → source, refund_amount)
+    C->>C: emit BatchCompleted
+```
+
+### Fee Calculation
+
+```mermaid
+flowchart LR
+    G["Gross Amount"] --> FC{"fee_bps > 0?"}
+    FC -->|yes| CAP{"asset fee cap\nset?"}
+    FC -->|no| NET2["Net = Gross\nFee = 0"]
+    CAP -->|yes| EFF["effective_bps =\nmin(global_bps, cap)"]
+    CAP -->|no| EFF2["effective_bps =\nglobal_bps"]
+    EFF --> CALC["Fee = Gross × effective_bps\n÷ 10 000"]
+    EFF2 --> CALC
+    CALC --> NET["Net = Gross − Fee"]
+    NET --> TGT["→ Target C-Address"]
+    CALC --> POOL["→ Accrued Fee Pool"]
+    NET2 --> TGT
+```
+
+### Contract State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Uninitialized : deploy
+
+    Uninitialized --> Initialized : initialize(admin, fee_collector, fee_bps)
+    note right of Uninitialized : All calls except\ninitialize() revert
+
+    Initialized --> Active : (implicit — initialized and not paused)
+    note right of Initialized : Admin can configure\nfees, roles, assets
+
+    Active --> Paused : admin calls pause()
+    Paused --> Active : admin calls unpause()
+
+    Active --> Active : fund_c_address\nbatch_fund_c_address\nfund_c_address_crosschain\nwithdraw_fees
+
+    Paused --> Paused : read-only queries\nstill work
+
+    Active --> Upgraded : admin calls upgrade(new_wasm_hash)
+    Upgraded --> Active : (same state, new code)
 ```
 
 ### Contract (`contracts/onboarding-bridge/`)
