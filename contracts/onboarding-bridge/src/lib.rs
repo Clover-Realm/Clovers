@@ -1981,6 +1981,11 @@ impl OnboardingBridge {
     pub fn query_auth_nonce_used(env: Env, source: Address, nonce: u64) -> bool {
         is_auth_nonce_used(&env, &source, nonce)
     }
+
+    pub fn query_accrued_fees(env: Env, asset: Address) -> i128 {
+        check_initialized(&env);
+        read_accrued_fees(&env, &asset)
+    }
 }
 
 #[cfg(test)]
