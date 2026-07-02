@@ -115,11 +115,17 @@ export interface CrossChainFundOptions {
   sigs: RelayerSig[];
 }
 
+
+
+
 /** Options for adding/removing a relayer */
 export interface RelayerManagementOptions {
   /** 32-byte Ed25519 public key as hex string */
   pubkey: string;
 }
+
+
+
 
 /** Options for creating a new C-address (smart contract account) */
 export interface CreateCOptions {
