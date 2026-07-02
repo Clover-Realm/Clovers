@@ -9,6 +9,9 @@ export interface BridgeConfig {
   timeout?: number;
 }
 
+
+
+
 export interface FundCOptions {
   /** Source account (G-address or C-address) sending the funds */
   source: string;
