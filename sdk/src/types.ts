@@ -84,6 +84,9 @@ export interface TransactionResult {
 
 // --- Cross-chain types ---
 
+
+
+
 /** A single relayer attestation: ed25519 pubkey (hex) + signature (hex) over the payload hash */
 export interface RelayerSig {
   /** 32-byte Ed25519 public key as hex string */
