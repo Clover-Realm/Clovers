@@ -14,6 +14,9 @@ pub async fn run_poller(state: Arc<AppState>) {
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
+
+
+    
 }
 
 async fn poll_once(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
