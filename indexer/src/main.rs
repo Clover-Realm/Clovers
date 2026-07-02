@@ -13,6 +13,9 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
+
+
+
 pub struct AppState {
     pub db: db::Database,
     pub rpc_url: String,

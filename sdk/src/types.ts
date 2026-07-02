@@ -9,6 +9,9 @@ export interface BridgeConfig {
   timeout?: number;
 }
 
+
+
+
 export interface FundCOptions {
   /** Source account (G-address or C-address) sending the funds */
   source: string;
@@ -43,6 +46,10 @@ export interface UpgradeOptions {
   newWasmHash: string;
 }
 
+
+
+
+
 export interface ReclaimTokensOptions {
   /** Asset contract address */
   asset: string;
@@ -61,6 +68,11 @@ export interface OffRampConfig {
   testMode?: boolean;
 }
 
+
+
+
+
+
 export interface TransactionResult {
   /** Transaction hash */
   hash: string;
@@ -72,6 +84,9 @@ export interface TransactionResult {
 
 // --- Cross-chain types ---
 
+
+
+
 /** A single relayer attestation: ed25519 pubkey (hex) + signature (hex) over the payload hash */
 export interface RelayerSig {
   /** 32-byte Ed25519 public key as hex string */
@@ -79,6 +94,13 @@ export interface RelayerSig {
   /** 64-byte Ed25519 signature as hex string */
   signature: string;
 }
+
+
+
+
+
+
+
 
 /** Options for funding a C-address from a cross-chain event */
 export interface CrossChainFundOptions {
@@ -96,11 +118,21 @@ export interface CrossChainFundOptions {
   sigs: RelayerSig[];
 }
 
+
+
+
 /** Options for adding/removing a relayer */
 export interface RelayerManagementOptions {
   /** 32-byte Ed25519 public key as hex string */
   pubkey: string;
 }
+
+
+
+
+
+
+
 
 /** Options for creating a new C-address (smart contract account) */
 export interface CreateCOptions {
@@ -116,6 +148,11 @@ export interface CreateCOptions {
     amount: string;
   };
 }
+
+
+
+
+
 
 /** Result of creating a C-address */
 export interface CreateCAddressResult {
