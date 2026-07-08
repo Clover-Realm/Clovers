@@ -11,6 +11,9 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
+
+
+
 #[cfg(target_family = "wasm")]
 #[alloc_error_handler]
 fn alloc_error(_: core::alloc::Layout) -> ! {
