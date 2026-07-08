@@ -9,6 +9,9 @@ const geistMono = Geist_Mono({
   subsets: ['latin'],
 })
 
+
+
+
 export const metadata: Metadata = {
   title: 'CLO-VER – Fast Onchain Experiences on Stellar',
   description: 'A unified monorepo for building fast, mobile-first onchain experiences on Stellar. Contracts, API, frontend, and infra in one place.',
