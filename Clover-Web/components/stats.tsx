@@ -5,9 +5,6 @@ export function Stats() {
     { metric: '100%', label: 'Type-Safe' },
     { metric: '1', label: 'Monorepo' },
   ]
-
-
-
   
   return (
     <section className="border-y border-border bg-secondary py-16">
