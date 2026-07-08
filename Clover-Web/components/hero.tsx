@@ -17,6 +17,9 @@ export function Hero() {
           <span className="text-sm text-muted">Build onchain on Stellar</span>
         </div>
 
+
+
+
         {/* Main Heading */}
         <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold text-foreground mb-6 text-balance leading-tight">
           Ship Onchain Apps
