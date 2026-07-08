@@ -98,10 +98,6 @@ export interface RelayerSig {
 
 
 
-
-
-
-
 /** Options for funding a C-address from a cross-chain event */
 export interface CrossChainFundOptions {
   /** Numeric source chain id (1 = Ethereum, 101 = Solana, etc.) */
