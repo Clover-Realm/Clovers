@@ -11,6 +11,10 @@ pub struct IndexedEvent {
     pub data: serde_json::Value,
 }
 
+
+
+
+
 #[derive(Debug, Deserialize)]
 pub struct EventQuery {
     pub limit: Option<i64>,
