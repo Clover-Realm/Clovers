@@ -4,9 +4,6 @@ import { ArrowRight } from 'lucide-react'
 import { Button } from './ui/button'
 
 
-
-
-
 export function CtaSection() {
   return (
     <section className="w-full py-20 md:py-32 px-4 sm:px-6 lg:px-8 border-t border-border">
