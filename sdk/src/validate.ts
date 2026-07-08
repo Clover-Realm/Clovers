@@ -8,6 +8,9 @@ export function assertAccountAddress(address: string, field: string): void {
   }
 }
 
+
+
+
 export function assertContractAddress(address: string, field: string): void {
   if (!StrKey.isValidContract(address)) {
     throw new Error(
