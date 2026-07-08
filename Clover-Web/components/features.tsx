@@ -2,6 +2,9 @@ import { Code2, Zap, Smartphone, Rocket } from 'lucide-react'
 
 export function Features() {
   const features = [
+
+
+    
     {
       icon: Code2,
       title: 'Soroban Contracts',
