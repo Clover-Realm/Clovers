@@ -6,6 +6,8 @@ import { CtaSection } from '@/components/cta-section'
 import { Footer } from '@/components/footer'
 
 export default function Page() {
+
+  
   return (
     <main className="w-full bg-background">
       <Header />
