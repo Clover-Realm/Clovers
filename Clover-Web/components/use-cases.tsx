@@ -1,9 +1,6 @@
 import { Gamepad2, Zap, Users } from 'lucide-react'
 
 export function UseCases() {
-
-
-  
   const products = [
     {
       icon: Gamepad2,
