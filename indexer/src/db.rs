@@ -454,7 +454,4 @@ fn row_to_event(
         data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null),
     }
 
-
-
-    
 }
