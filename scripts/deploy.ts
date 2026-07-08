@@ -10,6 +10,17 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 
+
+interface ref {
+  rpcUrl: string;
+  networkPassphrase: string;
+  adminSecretKey: string;
+  feeCollectorPublicKey: string;
+  feeBps: number;
+  wasmPath: string;
+}
+
+
 interface DeployConfig {
   rpcUrl: string;
   networkPassphrase: string;
