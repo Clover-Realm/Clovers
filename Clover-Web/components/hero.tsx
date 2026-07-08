@@ -10,6 +10,8 @@ export function Hero() {
         <div className="absolute bottom-0 left-1/4 w-[400px] h-[400px] bg-accent/8 rounded-full blur-3xl"></div>
       </div>
 
+
+
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
         {/* Badge */}
         <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-border bg-surface-secondary/50 backdrop-blur px-4 py-2">
