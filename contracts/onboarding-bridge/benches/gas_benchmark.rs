@@ -10,7 +10,6 @@ use onboarding_bridge::OnboardingBridge;
 
 
 
-
 #[contracttype]
 pub enum TDataKey {
     Admin,
