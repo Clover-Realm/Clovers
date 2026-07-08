@@ -6,6 +6,8 @@ A monorepo for building fast, mobile-first onchain experiences on the **Stellar*
 
 ---
 
+
+
 ## 🍀 About CLO-VER
 
 CLO-VER is a unified development framework and monorepo for shipping consumer-grade onchain products on **Stellar**. It exists to solve a recurring problem for teams building games, mini-apps, and social-fi experiences: contracts, backend services, and frontend clients tend to drift apart, duplicate logic, and slow teams down as they scale across multiple products.
