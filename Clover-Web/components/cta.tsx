@@ -2,6 +2,8 @@ import { ArrowRight } from 'lucide-react'
 
 export function CTA() {
   return (
+
+    
     <section className="py-20 border-t border-border">
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="relative rounded-2xl border border-border bg-gradient-to-r from-primary/10 to-primary/5 p-12 sm:p-16 overflow-hidden">
