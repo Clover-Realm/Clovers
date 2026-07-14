@@ -2,6 +2,7 @@ import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import { usersRouter } from './src/routes/users';
 
 dotenv.config();
 
@@ -31,6 +32,8 @@ export class App {
   }
 
   private routes(): void {
+    this.express.use('/api/users', usersRouter);
+
     this.express.get('/health', (_req: Request, res: Response) => {
       res.json({
         status: 'ok',
@@ -44,7 +47,7 @@ export class App {
       res.json({
         name: 'C-Address Onboarding Bridge API',
         version: '0.1.0',
-        endpoints: ['/health'],
+        endpoints: ['/health', 'GET /api/users', 'POST /api/users'],
       });
     });
   }
