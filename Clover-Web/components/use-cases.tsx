@@ -22,8 +22,11 @@ export function UseCases() {
     },
   ]
 
+
+
+  
   return (
-    <section className="w-full py-20 md:py-32 px-4 sm:px-6 lg:px-8 border-t border-border">
+    <section id="products" className="w-full py-20 md:py-32 px-4 sm:px-6 lg:px-8 border-t border-border">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="text-center mb-16">

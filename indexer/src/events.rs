@@ -12,9 +12,6 @@ pub struct IndexedEvent {
 }
 
 
-
-
-
 #[derive(Debug, Deserialize)]
 pub struct EventQuery {
     pub limit: Option<i64>,
@@ -35,6 +32,7 @@ pub enum BridgeEventType {
     CrossChainFunded,
     TimelockCreated,
     TimelockClaimed,
+    OperatorFunded,
 }
 
 impl BridgeEventType {
@@ -52,10 +50,15 @@ impl BridgeEventType {
             "CrossChainFunded" => Some(Self::CrossChainFunded),
             "TimelockCreated" => Some(Self::TimelockCreated),
             "TimelockClaimed" => Some(Self::TimelockClaimed),
+            // Note: `OperatorFunded` is intentionally NOT mapped here. It is
+            // parsed and persisted exclusively by the dedicated
+            // `parse_and_persist_operator_funded` handler in poller.rs.
             _ => None,
         }
     }
 
+
+    
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::CAddressFunded => "CAddressFunded",
@@ -70,6 +73,7 @@ impl BridgeEventType {
             Self::CrossChainFunded => "CrossChainFunded",
             Self::TimelockCreated => "TimelockCreated",
             Self::TimelockClaimed => "TimelockClaimed",
+            Self::OperatorFunded => "OperatorFunded",
         }
     }
 }

@@ -1,8 +1,6 @@
 import { Code2, Zap, Smartphone, Boxes } from 'lucide-react'
 
 export function Pillars() {
-
-  
   const pillars = [
     {
       icon: Code2,

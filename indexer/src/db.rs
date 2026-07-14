@@ -6,6 +6,9 @@ pub struct Database {
     pool: SqlitePool,
 }
 
+
+
+
 impl Database {
     pub async fn new(url: &str) -> Self {
         let pool = SqlitePoolOptions::new()
@@ -48,6 +51,12 @@ impl Database {
         .await
         .expect("Failed to create subscriptions table");
 
+
+
+
+
+
+        
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS webhook_deliveries (
                 id TEXT PRIMARY KEY,

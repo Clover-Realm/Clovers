@@ -1,24 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol,
-    Val, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Vec,
 };
-
-#[cfg(target_family = "wasm")]
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    core::arch::wasm32::unreachable()
-}
-
-
-
-
-#[cfg(target_family = "wasm")]
-#[alloc_error_handler]
-fn alloc_error(_: core::alloc::Layout) -> ! {
-    core::arch::wasm32::unreachable()
-}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -48,6 +32,13 @@ pub enum BridgeError {
     // Issue #95: replay protection for Soroban authorization entries
     AuthNonceAlreadyUsed = 23,
     AuthNonceExpired = 24,
+    // Operators: whitelisted accounts permitted to submit gasless funding on
+    // behalf of a source address (used for sponsored / gasless onboarding).
+    NotOperator = 25,
+    // --- Issue #72: timelocked upgrade path ---
+    UpgradeNotScheduled = 26,
+    UpgradeHashMismatch = 27,
+    UpgradeTimelockActive = 28,
 }
 
 #[contracttype]
@@ -89,6 +80,15 @@ pub enum DataKey {
     // Issue #95: per-address auth nonce counter and used-nonce set
     AuthNonce(Address),
     UsedAuthNonce(Address, u64),
+    // Operators: whitelisted accounts allowed to submit gasless funding on
+    // behalf of a source address.
+    Operator(Address),
+    // Issue #72: timelocked upgrade path
+    PendingUpgrade,
+    CurrentWasmHash,
+    // Registries used to enumerate operators / relayers for off-chain queries.
+    OperatorRegistry,
+    RelayerRegistry,
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -96,6 +96,9 @@ const FEE_DENOMINATOR: i128 = 10_000;
 const MAX_BATCH_SIZE: u32 = 100;
 const MAX_ALLOWED_TTL: u32 = 3_110_400; // ~1 year in ledgers (5s/ledger)
 const CRITICAL_ENTRY_TTL_THRESHOLD: u32 = 100_000;
+// Number of ledgers a scheduled upgrade must wait before it becomes
+// executable (~24 hours at 5 s/ledger).
+const UPGRADE_TIMELOCK_LEDGERS: u32 = 17_280;
 
 // --- Packed BridgeConfig struct (fee_bps + paused + allowlist_mode) ---
 
@@ -153,6 +156,15 @@ pub struct TimelockEntry {
     pub release_time: u64,
     pub cliff_time: u64,
     pub claimed: bool,
+}
+
+// --- Issue #72: timelocked upgrade path ---
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub new_wasm_hash: BytesN<32>,
+    pub executable_after_ledger: u32,
 }
 
 fn read_bridge_config(env: &Env) -> BridgeConfigData {
@@ -588,6 +600,19 @@ fn relayer_count(env: &Env) -> u32 {
         .unwrap_or(0u32)
 }
 
+fn read_relayer_registry(env: &Env) -> Map<BytesN<32>, bool> {
+    env.storage()
+        .instance()
+        .get(&DataKey::RelayerRegistry)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_relayer_registry(env: &Env, registry: &Map<BytesN<32>, bool>) {
+    env.storage()
+        .instance()
+        .set(&DataKey::RelayerRegistry, registry);
+}
+
 fn is_relayer(env: &Env, pubkey: &BytesN<32>) -> bool {
     env.storage()
         .persistent()
@@ -603,6 +628,9 @@ fn add_relayer(env: &Env, pubkey: &BytesN<32>) {
         env.storage()
             .instance()
             .set(&DataKey::RelayerCount, &(relayer_count(env) + 1));
+        let mut registry = read_relayer_registry(env);
+        registry.set(pubkey.clone(), true);
+        save_relayer_registry(env, &registry);
     }
 }
 
@@ -615,6 +643,9 @@ fn remove_relayer(env: &Env, pubkey: &BytesN<32>) {
         env.storage()
             .instance()
             .set(&DataKey::RelayerCount, &(count.saturating_sub(1)));
+        let mut registry = read_relayer_registry(env);
+        registry.remove(pubkey.clone());
+        save_relayer_registry(env, &registry);
     }
 }
 
@@ -642,6 +673,75 @@ fn mark_nonce_used(env: &Env, nonce: &BytesN<32>) {
     env.storage()
         .persistent()
         .set(&DataKey::CrossChainNonce(nonce.clone()), &true);
+}
+
+// --- Operator helpers (gasless / sponsored funding) ---
+
+fn read_operator_registry(env: &Env) -> Map<Address, bool> {
+    env.storage()
+        .instance()
+        .get(&DataKey::OperatorRegistry)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_operator_registry(env: &Env, registry: &Map<Address, bool>) {
+    env.storage()
+        .instance()
+        .set(&DataKey::OperatorRegistry, registry);
+}
+
+fn is_operator(env: &Env, operator: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Operator(operator.clone()))
+        .unwrap_or(false)
+}
+
+fn add_operator(env: &Env, operator: &Address) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Operator(operator.clone()), &true);
+    let mut registry = read_operator_registry(env);
+    registry.set(operator.clone(), true);
+    save_operator_registry(env, &registry);
+}
+
+fn remove_operator(env: &Env, operator: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Operator(operator.clone()));
+    let mut registry = read_operator_registry(env);
+    registry.remove(operator.clone());
+    save_operator_registry(env, &registry);
+}
+
+// --- Issue #72: timelocked upgrade path helpers ---
+
+fn read_current_wasm_hash(env: &Env) -> BytesN<32> {
+    env.storage()
+        .instance()
+        .get(&DataKey::CurrentWasmHash)
+        .unwrap_or_else(|| BytesN::from_array(env, &[0u8; 32]))
+}
+
+fn save_current_wasm_hash(env: &Env, hash: &BytesN<32>) {
+    env.storage()
+        .instance()
+        .set(&DataKey::CurrentWasmHash, hash);
+}
+
+fn save_pending_upgrade(env: &Env, pending: &PendingUpgrade) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingUpgrade, pending);
+}
+
+fn read_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+fn clear_pending_upgrade(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingUpgrade);
 }
 
 // --- Daily limit helpers ---
@@ -1759,6 +1859,196 @@ impl OnboardingBridge {
     pub fn query_is_relayer(env: Env, pubkey: BytesN<32>) -> Result<bool, BridgeError> {
         check_initialized(&env)?;
         Ok(is_relayer(&env, &pubkey))
+    }
+
+    /// Whitelist multiple relayers in a single invocation.
+    pub fn add_relayers(
+        env: Env,
+        pubkeys: Vec<BytesN<32>>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        read_admin(&env).require_auth();
+        for i in 0..pubkeys.len() {
+            add_relayer(&env, &pubkeys.get(i).unwrap());
+        }
+        env.events()
+            .publish(("RelayersAdded",), (pubkeys.len(),));
+        Ok(())
+    }
+
+    /// Remove multiple relayers, refusing if doing so would drop the active
+    /// relayer set below the configured threshold.
+    pub fn remove_relayers(
+        env: Env,
+        pubkeys: Vec<BytesN<32>>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        read_admin(&env).require_auth();
+        let mut removable: u32 = 0;
+        for i in 0..pubkeys.len() {
+            if is_relayer(&env, &pubkeys.get(i).unwrap()) {
+                removable += 1;
+            }
+        }
+        let new_count = relayer_count(&env).saturating_sub(removable);
+        if new_count < relayer_threshold(&env) {
+            return Err(BridgeError::BelowThreshold);
+        }
+        for i in 0..pubkeys.len() {
+            remove_relayer(&env, &pubkeys.get(i).unwrap());
+        }
+        env.events()
+            .publish(("RelayersRemoved",), (pubkeys.len(),));
+        Ok(())
+    }
+
+    /// Return the full set of whitelisted relayer public keys.
+    pub fn query_relayers(env: Env) -> Result<Vec<BytesN<32>>, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_relayer_registry(&env).keys())
+    }
+
+    // --- Operators (gasless / sponsored funding) ---
+
+    /// Whitelist `operator` so it may submit gasless funding on behalf of a
+    /// source address via `fund_c_address_as_operator`.
+    pub fn add_operator(
+        env: Env,
+        operator: Address,
+        nonce: Option<u64>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
+        add_operator(&env, &operator);
+        env.events()
+            .publish(("OperatorAdded", operator.clone()), (admin,));
+        Ok(())
+    }
+
+    /// Remove `operator` from the whitelist.
+    pub fn remove_operator(
+        env: Env,
+        operator: Address,
+        nonce: Option<u64>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
+        remove_operator(&env, &operator);
+        env.events()
+            .publish(("OperatorRemoved", operator.clone()), (admin,));
+        Ok(())
+    }
+
+    /// Query whether `operator` is currently whitelisted.
+    pub fn query_is_operator(env: Env, operator: Address) -> Result<bool, BridgeError> {
+        check_initialized(&env)?;
+        Ok(is_operator(&env, &operator))
+    }
+
+    /// Whitelist multiple operators in a single invocation.
+    pub fn add_operators(
+        env: Env,
+        operators: Vec<Address>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        for i in 0..operators.len() {
+            add_operator(&env, &operators.get(i).unwrap());
+        }
+        env.events()
+            .publish(("OperatorsAdded",), (operators.len(),));
+        Ok(())
+    }
+
+    /// Remove multiple operators in a single invocation.
+    pub fn remove_operators(
+        env: Env,
+        operators: Vec<Address>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        for i in 0..operators.len() {
+            remove_operator(&env, &operators.get(i).unwrap());
+        }
+        env.events()
+            .publish(("OperatorsRemoved",), (operators.len(),));
+        Ok(())
+    }
+
+    /// Return the full set of whitelisted operator addresses.
+    pub fn query_operators(env: Env) -> Result<Vec<Address>, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_operator_registry(&env).keys())
+    }
+
+    /// Fund a C-address on behalf of `source` without requiring the source to
+    /// sign. Only a whitelisted `operator` may call this; the operator itself
+    /// must authorize the invocation.
+    ///
+    /// Emits `OperatorFunded(source, target, operator)` with
+    /// `(amount, fee, asset)` so off-chain indexers can attribute the funding
+    /// to the sponsoring operator.
+    pub fn fund_c_address_as_operator(
+        env: Env,
+        source: Address,
+        target: Address,
+        asset: Address,
+        amount: i128,
+        operator: Address,
+        nonce: Option<u64>,
+        deadline: Option<u64>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        check_not_paused(&env)?;
+        if let Some(d) = deadline {
+            if env.ledger().timestamp() > d {
+                return Err(BridgeError::TransactionExpired);
+            }
+        }
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        if !is_operator(&env, &operator) {
+            return Err(BridgeError::NotOperator);
+        }
+        check_access(&env, &target)?;
+        check_asset_whitelisted(&env, &asset)?;
+        check_daily_limit(&env, &source, &asset, amount)?;
+        operator.require_auth();
+        consume_nonce(&env, &operator, nonce)?;
+
+        let token_client = token::Client::new(&env, &asset);
+        let contract_addr = env.current_contract_address();
+        token_client.transfer(&source, &contract_addr, &amount);
+
+        let global_fee_bps = read_fee_bps(&env);
+        let effective_fee_bps = get_effective_fee_bps(&env, &asset, global_fee_bps);
+        let fee = calculate_fee(amount, effective_fee_bps);
+        let net_amount = amount - fee;
+
+        if net_amount > 0 {
+            token_client.transfer(&contract_addr, &target, &net_amount);
+        }
+
+        increment_user_deposit(&env, &source, &asset, amount);
+        increment_accrued_fees(&env, &asset, fee);
+        increment_total_bridged(&env, &asset, net_amount);
+        increment_total_fees_collected(&env, &asset, fee);
+        increment_source_bridged_volume(&env, &source, amount);
+
+        mint_loyalty_tokens(&env, &source);
+
+        env.events().publish(
+            ("OperatorFunded", source, target, operator),
+            (amount, fee, asset),
+        );
+        Ok(())
     }
 
     // --- Timelocked Funding ---

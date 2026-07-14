@@ -8,6 +8,9 @@
 
 set -euo pipefail
 
+
+
+
 BASELINE="${1:?Usage: compare_benchmarks.sh <baseline.json> <current.json> [threshold_percent]}"
 CURRENT="${2:?Usage: compare_benchmarks.sh <baseline.json> <current.json> [threshold_percent]}"
 THRESHOLD="${3:-5}"

@@ -5,6 +5,10 @@ use std::sync::Arc;
 const POLL_INTERVAL_MS: u64 = 5000;
 const MAX_EVENTS_PER_POLL: usize = 100;
 
+
+
+
+
 pub async fn run_poller(state: Arc<AppState>) {
     tracing::info!("Starting event poller for contract {}", state.contract_id);
 
@@ -75,6 +79,13 @@ async fn poll_once(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(0);
         if ledger > max_ledger {
             max_ledger = ledger;
+        }
+
+        // Operator-sponsored funding has a dedicated handler so we can persist
+        // the sponsoring operator alongside the source/target. Try it first;
+        // if it doesn't match, fall back to the generic event parser.
+        if parse_and_persist_operator_funded(raw_event, &state).await? {
+            continue;
         }
 
         if let Some(indexed) = parse_contract_event(raw_event, &state.contract_id) {
@@ -151,4 +162,95 @@ fn parse_contract_event(
         timestamp,
         data: serde_json::Value::Object(data),
     })
+}
+
+/// Parse and persist a contract `OperatorFunded` event emitted by
+/// `OnboardingBridge::fund_c_address_as_operator`.
+///
+/// The event carries four topics — `["OperatorFunded", source, target,
+/// operator]` — and a `(amount, fee, asset)` payload. This handler extracts the
+/// sponsoring `operator` (which the generic parser would drop) and persists it
+/// into the event `data` before inserting the row and queueing any matching
+/// webhook deliveries.
+///
+/// Returns `Ok(true)` if `raw` was an `OperatorFunded` event (and was indexed),
+/// or `Ok(false)` if it was some other event type (so the caller can fall back
+/// to the generic parser).
+async fn parse_and_persist_operator_funded(
+    raw: &serde_json::Value,
+    state: &AppState,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let topics = match raw.get("topic").and_then(|t| t.as_array()) {
+        Some(t) if t.len() >= 4 && t[0].as_str() == Some("OperatorFunded") => t,
+        _ => return Ok(false),
+    };
+
+    let source = topics
+        .get(1)
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let target = topics
+        .get(2)
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let operator = topics
+        .get(3)
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let ledger = raw.get("ledger").and_then(|l| l.as_i64()).unwrap_or(0);
+    let tx_hash = raw
+        .get("txHash")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let timestamp = raw
+        .get("createdAt")
+        .and_then(|t| t.as_str())
+        .unwrap_or(&chrono::Utc::now().to_rfc3339())
+        .to_string();
+
+    let mut data = serde_json::Map::new();
+    data.insert("source".to_string(), serde_json::Value::String(source.clone()));
+    data.insert("target".to_string(), serde_json::Value::String(target.clone()));
+    data.insert("operator".to_string(), serde_json::Value::String(operator));
+    if let Some(value) = raw.get("value") {
+        data.insert("value".to_string(), value.clone());
+    }
+
+    let id = format!(
+        "{}-{}-{}",
+        ledger,
+        tx_hash.get(..8).unwrap_or("unknown"),
+        uuid::Uuid::new_v4().to_string().get(..8).unwrap_or("rand")
+    );
+
+    let indexed = IndexedEvent {
+        id,
+        event_type: BridgeEventType::OperatorFunded.as_str().to_string(),
+        ledger_sequence: ledger,
+        contract_id: state.contract_id.clone(),
+        tx_hash,
+        timestamp,
+        data: serde_json::Value::Object(data),
+    };
+
+    state.db.insert_event(&indexed).await?;
+    state.db.queue_webhook_deliveries(&indexed).await?;
+    tracing::info!(
+        "Indexed operator-funded event: operator {} funded {} on behalf of {} at ledger {}",
+        indexed
+            .data
+            .get("operator")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        target,
+        source,
+        indexed.ledger_sequence
+    );
+
+    Ok(true)
 }

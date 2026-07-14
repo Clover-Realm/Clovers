@@ -3,6 +3,10 @@ import { Terminal, Package, Cpu } from 'lucide-react'
 export function DeveloperStack() {
 
 
+
+
+
+
   
   const stacks = [
     {

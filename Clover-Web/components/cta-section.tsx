@@ -1,10 +1,20 @@
 'use client'
 
-import { ArrowRight } from 'lucide-react'
+import { useState, type FormEvent } from 'react'
+import { ArrowRight, CheckCircle2, Mail } from 'lucide-react'
 import { Button } from './ui/button'
 
-
 export function CtaSection() {
+  const [email, setEmail] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    if (!email.trim()) return
+    // No backend yet — capture intent locally. Wire to the API/SDK later.
+    setSubmitted(true)
+  }
+
   return (
     <section className="w-full py-20 md:py-32 px-4 sm:px-6 lg:px-8 border-t border-border">
       <div className="max-w-4xl mx-auto">
@@ -19,24 +29,57 @@ export function CtaSection() {
               Ready to Ship?
             </h2>
             <p className="text-lg text-muted max-w-xl mx-auto mb-8">
-              Start building your onchain product today. Get a fully configured monorepo in seconds.
+              Start building your onchain product today. Get a fully configured
+              monorepo in seconds.
             </p>
 
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Button 
-                size="lg" 
+            <div className="flex flex-col sm:flex-row gap-4 justify-center mb-8">
+              <Button
+                size="lg"
                 className="bg-primary text-primary-foreground hover:bg-primary/90 text-base font-medium"
               >
                 Get Started <ArrowRight className="w-5 h-5 ml-2" />
               </Button>
-              <Button 
-                size="lg" 
+              <Button
+                size="lg"
                 variant="outline"
                 className="border-border text-foreground hover:bg-surface-secondary"
               >
                 Read the Docs
               </Button>
             </div>
+
+            {submitted ? (
+              <div className="flex items-center justify-center gap-2 text-primary font-medium">
+                <CheckCircle2 className="w-5 h-5" />
+                <span>You&apos;re on the list — we&apos;ll be in touch soon. 🍀</span>
+              </div>
+            ) : (
+              <form
+                onSubmit={handleSubmit}
+                className="flex flex-col sm:flex-row gap-3 justify-center max-w-md mx-auto"
+              >
+                <div className="relative flex-1">
+                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@stellar.org"
+                    aria-label="Email address"
+                    className="w-full h-9 rounded-lg border border-border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  size="lg"
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 text-base font-medium"
+                >
+                  Join Waitlist <ArrowRight className="w-5 h-5 ml-2" />
+                </Button>
+              </form>
+            )}
 
             <p className="text-sm text-muted mt-8">
               🍀 Built with luck and on-chain logic, on Stellar.
