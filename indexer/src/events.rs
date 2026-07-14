@@ -12,9 +12,6 @@ pub struct IndexedEvent {
 }
 
 
-
-
-
 #[derive(Debug, Deserialize)]
 pub struct EventQuery {
     pub limit: Option<i64>,
@@ -56,6 +53,8 @@ impl BridgeEventType {
         }
     }
 
+
+    
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::CAddressFunded => "CAddressFunded",
