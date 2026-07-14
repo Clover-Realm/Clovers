@@ -6,6 +6,9 @@ pub struct Database {
     pool: SqlitePool,
 }
 
+
+
+
 impl Database {
     pub async fn new(url: &str) -> Self {
         let pool = SqlitePoolOptions::new()
