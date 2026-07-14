@@ -48,6 +48,9 @@ pub enum BridgeError {
     // Issue #95: replay protection for Soroban authorization entries
     AuthNonceAlreadyUsed = 23,
     AuthNonceExpired = 24,
+    // Operators: whitelisted accounts permitted to submit gasless funding on
+    // behalf of a source address (used for sponsored / gasless onboarding).
+    NotOperator = 25,
 }
 
 #[contracttype]
@@ -89,6 +92,9 @@ pub enum DataKey {
     // Issue #95: per-address auth nonce counter and used-nonce set
     AuthNonce(Address),
     UsedAuthNonce(Address, u64),
+    // Operators: whitelisted accounts allowed to submit gasless funding on
+    // behalf of a source address.
+    Operator(Address),
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -642,6 +648,27 @@ fn mark_nonce_used(env: &Env, nonce: &BytesN<32>) {
     env.storage()
         .persistent()
         .set(&DataKey::CrossChainNonce(nonce.clone()), &true);
+}
+
+// --- Operator helpers (gasless / sponsored funding) ---
+
+fn is_operator(env: &Env, operator: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Operator(operator.clone()))
+        .unwrap_or(false)
+}
+
+fn add_operator(env: &Env, operator: &Address) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Operator(operator.clone()), &true);
+}
+
+fn remove_operator(env: &Env, operator: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Operator(operator.clone()));
 }
 
 // --- Daily limit helpers ---
@@ -1759,6 +1786,111 @@ impl OnboardingBridge {
     pub fn query_is_relayer(env: Env, pubkey: BytesN<32>) -> Result<bool, BridgeError> {
         check_initialized(&env)?;
         Ok(is_relayer(&env, &pubkey))
+    }
+
+    // --- Operators (gasless / sponsored funding) ---
+
+    /// Whitelist `operator` so it may submit gasless funding on behalf of a
+    /// source address via `fund_c_address_as_operator`.
+    pub fn add_operator(
+        env: Env,
+        operator: Address,
+        nonce: Option<u64>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
+        add_operator(&env, &operator);
+        env.events()
+            .publish(("OperatorAdded", operator.clone()), (admin,));
+        Ok(())
+    }
+
+    /// Remove `operator` from the whitelist.
+    pub fn remove_operator(
+        env: Env,
+        operator: Address,
+        nonce: Option<u64>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        consume_nonce(&env, &admin, nonce)?;
+        remove_operator(&env, &operator);
+        env.events()
+            .publish(("OperatorRemoved", operator.clone()), (admin,));
+        Ok(())
+    }
+
+    /// Query whether `operator` is currently whitelisted.
+    pub fn query_is_operator(env: Env, operator: Address) -> Result<bool, BridgeError> {
+        check_initialized(&env)?;
+        Ok(is_operator(&env, &operator))
+    }
+
+    /// Fund a C-address on behalf of `source` without requiring the source to
+    /// sign. Only a whitelisted `operator` may call this; the operator itself
+    /// must authorize the invocation.
+    ///
+    /// Emits `OperatorFunded(source, target, operator)` with
+    /// `(amount, fee, asset)` so off-chain indexers can attribute the funding
+    /// to the sponsoring operator.
+    pub fn fund_c_address_as_operator(
+        env: Env,
+        source: Address,
+        target: Address,
+        asset: Address,
+        amount: i128,
+        operator: Address,
+        nonce: Option<u64>,
+        deadline: Option<u64>,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        check_not_paused(&env)?;
+        if let Some(d) = deadline {
+            if env.ledger().timestamp() > d {
+                return Err(BridgeError::TransactionExpired);
+            }
+        }
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        if !is_operator(&env, &operator) {
+            return Err(BridgeError::NotOperator);
+        }
+        check_access(&env, &target)?;
+        check_asset_whitelisted(&env, &asset)?;
+        check_daily_limit(&env, &source, &asset, amount)?;
+        operator.require_auth();
+        consume_nonce(&env, &operator, nonce)?;
+
+        let token_client = token::Client::new(&env, &asset);
+        let contract_addr = env.current_contract_address();
+        token_client.transfer(&source, &contract_addr, &amount);
+
+        let global_fee_bps = read_fee_bps(&env);
+        let effective_fee_bps = get_effective_fee_bps(&env, &asset, global_fee_bps);
+        let fee = calculate_fee(amount, effective_fee_bps);
+        let net_amount = amount - fee;
+
+        if net_amount > 0 {
+            token_client.transfer(&contract_addr, &target, &net_amount);
+        }
+
+        increment_user_deposit(&env, &source, &asset, amount);
+        increment_accrued_fees(&env, &asset, fee);
+        increment_total_bridged(&env, &asset, net_amount);
+        increment_total_fees_collected(&env, &asset, fee);
+        increment_source_bridged_volume(&env, &source, amount);
+
+        mint_loyalty_tokens(&env, &source);
+
+        env.events().publish(
+            ("OperatorFunded", source, target, operator),
+            (amount, fee, asset),
+        );
+        Ok(())
     }
 
     // --- Timelocked Funding ---
