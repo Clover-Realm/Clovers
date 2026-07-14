@@ -5,6 +5,10 @@ use std::sync::Arc;
 const POLL_INTERVAL_MS: u64 = 5000;
 const MAX_EVENTS_PER_POLL: usize = 100;
 
+
+
+
+
 pub async fn run_poller(state: Arc<AppState>) {
     tracing::info!("Starting event poller for contract {}", state.contract_id);
 
