@@ -27,9 +27,6 @@ export function DeveloperStack() {
       tech: 'React 19 + Tailwind',
       details: ['Mobile-first responsive', 'Wallet integration', 'Real-time state sync'],
     },
-    {
-
-    }
   ]
 
   return (
