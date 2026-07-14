@@ -51,6 +51,12 @@ impl Database {
         .await
         .expect("Failed to create subscriptions table");
 
+
+
+
+
+
+        
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS webhook_deliveries (
                 id TEXT PRIMARY KEY,
