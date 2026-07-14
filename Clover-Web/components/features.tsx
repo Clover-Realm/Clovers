@@ -25,6 +25,9 @@ export function Features() {
       title: 'Infrastructure',
       description: 'One-click Stellar deployment. Automated CI/CD, monitoring, and production-ready tooling included.',
     },
+
+
+    
   ]
 
   const benefits = [
