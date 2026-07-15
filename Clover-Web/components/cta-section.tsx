@@ -7,10 +7,22 @@ import { Button } from './ui/button'
 export function CtaSection() {
   const [email, setEmail] = useState('')
   const [submitted, setSubmitted] = useState(false)
+  const [error, setError] = useState('')
+
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    if (!email.trim()) return
+    setError('')
+    const value = email.trim()
+    if (!value) {
+      setError('Please enter your email address.')
+      return
+    }
+    if (!EMAIL_RE.test(value)) {
+      setError('Please enter a valid email address.')
+      return
+    }
     // No backend yet — capture intent locally. Wire to the API/SDK later.
     setSubmitted(true)
   }

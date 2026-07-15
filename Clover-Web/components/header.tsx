@@ -42,11 +42,11 @@ export function Header() {
         {/* Mobile Navigation */}
         {isOpen && (
           <div className="md:hidden pb-4 space-y-3 border-t border-border pt-4">
-            <a href="#features" className="block px-2 py-2 text-sm text-muted hover:text-foreground hover:bg-surface-secondary rounded-lg transition-colors">Features</a>
-            <a href="#products" className="block px-2 py-2 text-sm text-muted hover:text-foreground hover:bg-surface-secondary rounded-lg transition-colors">Products</a>
-            <a href="https://github.com" className="block px-2 py-2 text-sm text-muted hover:text-foreground hover:bg-surface-secondary rounded-lg transition-colors">GitHub</a>
+            <a href="#features" onClick={() => setIsOpen(false)} className="block px-2 py-2 text-sm text-muted hover:text-foreground hover:bg-surface-secondary rounded-lg transition-colors">Features</a>
+            <a href="#products" onClick={() => setIsOpen(false)} className="block px-2 py-2 text-sm text-muted hover:text-foreground hover:bg-surface-secondary rounded-lg transition-colors">Products</a>
+            <a href="https://github.com" onClick={() => setIsOpen(false)} className="block px-2 py-2 text-sm text-muted hover:text-foreground hover:bg-surface-secondary rounded-lg transition-colors">GitHub</a>
             <div className="pt-3 space-y-2 border-t border-border">
-              <a href="#" className="block px-4 py-2 text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors rounded-lg">Get Started</a>
+              <a href="#" onClick={() => setIsOpen(false)} className="block px-4 py-2 text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors rounded-lg">Get Started</a>
             </div>
           </div>
         )}
