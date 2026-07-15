@@ -1,7 +1,17 @@
+'use client'
+
 import { ArrowRight, GitBranch } from 'lucide-react'
 import { Button } from './ui/button'
 
 export function Hero() {
+  const scrollTo = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  const openGitHub = () => {
+    window.open('https://github.com', '_blank', 'noopener,noreferrer')
+  }
+
   return (
     <section className="relative w-full min-h-screen flex items-center justify-center overflow-hidden pt-20 pb-20">
       {/* Gradient background elements */}
@@ -15,7 +25,6 @@ export function Hero() {
           <span className="text-lg">🍀</span>
           <span className="text-sm text-muted">Build onchain on Stellar</span>
         </div>
-
 
 
 
@@ -33,20 +42,22 @@ export function Hero() {
 
         {/* CTA Buttons */}
         <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-          <Button 
-            size="lg" 
+          <Button
+            size="lg"
             className="bg-primary text-primary-foreground hover:bg-primary/90 text-base font-medium"
+            onClick={() => scrollTo('how-it-works')}
           >
             Get Started <ArrowRight className="w-5 h-5 ml-2" />
           </Button>
-            <Button 
-              size="lg" 
-              variant="outline"
-              className="border-border text-foreground hover:bg-surface-secondary"
-            >
-              <GitBranch className="w-5 h-5 mr-2" />
-              GitHub
-            </Button>
+          <Button
+            size="lg"
+            variant="outline"
+            className="border-border text-foreground hover:bg-surface-secondary"
+            onClick={openGitHub}
+          >
+            <GitBranch className="w-5 h-5 mr-2" />
+            GitHub
+          </Button>
         </div>
 
         {/* Command prompt */}

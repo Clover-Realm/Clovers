@@ -9,6 +9,10 @@ usersRouter.get('/', (_req: Request, res: Response) => {
   res.json({ users: listUsers() });
 });
 
+
+
+
+
 /**
  * Create a user.
  * Validates the request body with zod; on failure returns 400 with

@@ -10,6 +10,9 @@ export interface PublicUser {
   createdAt: string;
 }
 
+
+
+
 interface StoredUser extends PublicUser {
   passwordHash: string;
   salt: string;

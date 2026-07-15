@@ -9,6 +9,11 @@ export function hashPassword(password: string): { hash: string; salt: string } {
   return { hash, salt };
 }
 
+
+
+
+
+
 /** Constant-time verification of a plaintext password against a stored hash. */
 export function verifyPassword(
   password: string,

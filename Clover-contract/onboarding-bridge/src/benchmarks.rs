@@ -11,10 +11,6 @@
 
 #![cfg(test)]
 
-
-
-
-
 use crate::OnboardingBridge;
 
 use soroban_sdk::{
