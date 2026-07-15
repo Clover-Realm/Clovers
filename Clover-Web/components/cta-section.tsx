@@ -70,6 +70,7 @@ export function CtaSection() {
               <form
                 onSubmit={handleSubmit}
                 className="flex flex-col sm:flex-row gap-3 justify-center max-w-md mx-auto"
+                noValidate
               >
                 <div className="relative flex-1">
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
@@ -80,7 +81,12 @@ export function CtaSection() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@stellar.org"
                     aria-label="Email address"
-                    className="w-full h-9 rounded-lg border border-border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                    aria-invalid={error ? true : undefined}
+                    className={`w-full h-9 rounded-lg border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted outline-none focus-visible:ring-3 focus-visible:ring-ring/50 ${
+                      error
+                        ? 'border-destructive focus-visible:border-destructive'
+                        : 'border-border focus-visible:border-ring'
+                    }`}
                   />
                 </div>
                 <Button
@@ -91,6 +97,11 @@ export function CtaSection() {
                   Join Waitlist <ArrowRight className="w-5 h-5 ml-2" />
                 </Button>
               </form>
+              {error && (
+                <p className="text-sm text-destructive mt-3" role="alert">
+                  {error}
+                </p>
+              )}
             )}
 
             <p className="text-sm text-muted mt-8">
