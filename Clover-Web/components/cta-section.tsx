@@ -67,6 +67,7 @@ export function CtaSection() {
                 <span>You&apos;re on the list — we&apos;ll be in touch soon. 🍀</span>
               </div>
             ) : (
+              <>
               <form
                 onSubmit={handleSubmit}
                 className="flex flex-col sm:flex-row gap-3 justify-center max-w-md mx-auto"
@@ -102,6 +103,7 @@ export function CtaSection() {
                   {error}
                 </p>
               )}
+              </>
             )}
 
             <p className="text-sm text-muted mt-8">
