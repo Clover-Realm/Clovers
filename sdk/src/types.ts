@@ -12,6 +12,10 @@ export interface BridgeConfig {
 
 
 
+
+
+
+
 export interface FundCOptions {
   /** Source account (G-address or C-address) sending the funds */
   source: string;
