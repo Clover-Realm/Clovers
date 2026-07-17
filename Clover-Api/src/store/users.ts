@@ -13,6 +13,10 @@ export interface PublicUser {
 
 
 
+
+
+
+
 interface StoredUser extends PublicUser {
   passwordHash: string;
   salt: string;
