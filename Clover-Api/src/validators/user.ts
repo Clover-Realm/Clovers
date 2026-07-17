@@ -30,4 +30,7 @@ export const createUserSchema = z.object({
     .regex(/[0-9]/, 'Password must contain a number'),
 });
 
+
+
+
 export type CreateUserInput = z.infer<typeof createUserSchema>;
